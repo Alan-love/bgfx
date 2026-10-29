@@ -1,10 +1,13 @@
 /*
- * Copyright 2011-2022 Branimir Karadzic. All rights reserved.
+ * Copyright 2011-2026 Branimir Karadzic. All rights reserved.
  * License: https://github.com/bkaradzic/bgfx/blob/master/LICENSE
  */
 
 #ifndef BGFX_DXGI_H_HEADER_GUARD
 #define BGFX_DXGI_H_HEADER_GUARD
+
+#include <sal.h>
+#include <unknwn.h>
 
 #if BX_PLATFORM_LINUX || BX_PLATFORM_WINDOWS || BX_PLATFORM_WINRT
 #	include <d3dcommon.h>
@@ -25,7 +28,7 @@ namespace bgfx
 	typedef HRESULT (WINAPI* PFN_GET_DEBUG_INTERFACE)(REFIID _riid, void** _debug);
 	typedef HRESULT (WINAPI* PFN_GET_DEBUG_INTERFACE1)(UINT _flags, REFIID _riid, void** _debug);
 
-	struct SwapChainDesc
+	struct DxgiSwapChainDesc
 	{
 		uint32_t width;
 		uint32_t height;
@@ -39,9 +42,11 @@ namespace bgfx
 		DXGI_ALPHA_MODE alphaMode;
 		uint32_t flags;
 		uint8_t maxFrameLatency;
+		bool waitable;
 		void* nwh;
 		void* ndt;
 		bool windowed;
+		bool hdr10;
 	};
 
 	struct DxgiSwapChain
@@ -53,7 +58,7 @@ namespace bgfx
 	///
 	struct Dxgi
 	{
-#if BX_PLATFORM_WINDOWS
+#if BX_PLATFORM_LINUX || BX_PLATFORM_WINDOWS
 		typedef ::IDXGIAdapter3   AdapterI;
 		typedef ::IDXGIFactory5   FactoryI;
 		typedef ::IDXGISwapChain3 SwapChainI;
@@ -83,18 +88,16 @@ namespace bgfx
 		void update(IUnknown* _device);
 
 		///
-		HRESULT createSwapChain(IUnknown* _device, const SwapChainDesc& _scd, SwapChainI** _swapChain);
-
-#if BX_PLATFORM_WINRT
-		///
-		HRESULT removeSwapChain(const SwapChainDesc& _scd, SwapChainI** _swapChain);
-#endif
+		HRESULT createSwapChain(IUnknown* _device, const DxgiSwapChainDesc& _scd, SwapChainI** _swapChain);
 
 		///
-		void updateHdr10(SwapChainI* _swapChain, const SwapChainDesc& _scd);
+		HRESULT removeSwapChain(const DxgiSwapChainDesc& _scd);
 
 		///
-		HRESULT resizeBuffers(SwapChainI* _swapChain, const SwapChainDesc& _scd, const uint32_t* _nodeMask = NULL, IUnknown* const* _presentQueue = NULL);
+		void updateHdr10(SwapChainI* _swapChain, const DxgiSwapChainDesc& _scd);
+
+		///
+		HRESULT resizeBuffers(SwapChainI* _swapChain, const DxgiSwapChainDesc& _scd, const uint32_t* _nodeMask = NULL, IUnknown* const* _presentQueue = NULL);
 
 		///
 		void trim();

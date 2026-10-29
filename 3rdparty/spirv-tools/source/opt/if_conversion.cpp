@@ -23,7 +23,7 @@ namespace spvtools {
 namespace opt {
 
 Pass::Status IfConversion::Process() {
-  if (!context()->get_feature_mgr()->HasCapability(SpvCapabilityShader)) {
+  if (!context()->get_feature_mgr()->HasCapability(spv::Capability::Shader)) {
     return Status::SuccessWithoutChange;
   }
 
@@ -40,7 +40,7 @@ Pass::Status IfConversion::Process() {
 
       // Get an insertion point.
       auto iter = block.begin();
-      while (iter != block.end() && iter->opcode() == SpvOpPhi) {
+      while (iter != block.end() && iter->opcode() == spv::Op::OpPhi) {
         ++iter;
       }
 
@@ -126,6 +126,7 @@ Pass::Status IfConversion::Process() {
           condition = SplatCondition(vec_data_ty, condition, &builder);
         }
 
+        // TODO(1841): Handle id overflow.
         Instruction* select = builder.AddSelect(phi->type_id(), condition,
                                                 true_value->result_id(),
                                                 false_value->result_id());
@@ -171,23 +172,26 @@ bool IfConversion::CheckBlock(BasicBlock* block, DominatorAnalysis* dominators,
   *common = dominators->CommonDominator(inc0, inc1);
   if (!*common || cfg()->IsPseudoEntryBlock(*common)) return false;
   Instruction* branch = (*common)->terminator();
-  if (branch->opcode() != SpvOpBranchConditional) return false;
+  if (branch->opcode() != spv::Op::OpBranchConditional) return false;
   auto merge = (*common)->GetMergeInst();
-  if (!merge || merge->opcode() != SpvOpSelectionMerge) return false;
-  if (merge->GetSingleWordInOperand(1) == SpvSelectionControlDontFlattenMask)
+  if (!merge || merge->opcode() != spv::Op::OpSelectionMerge) return false;
+  if (spv::SelectionControlMask(merge->GetSingleWordInOperand(1)) ==
+      spv::SelectionControlMask::DontFlatten) {
     return false;
+  }
   if ((*common)->MergeBlockIdIfAny() != block->id()) return false;
 
   return true;
 }
 
 bool IfConversion::CheckPhiUsers(Instruction* phi, BasicBlock* block) {
-  return get_def_use_mgr()->WhileEachUser(phi, [block,
-                                                this](Instruction* user) {
-    if (user->opcode() == SpvOpPhi && context()->get_instr_block(user) == block)
-      return false;
-    return true;
-  });
+  return get_def_use_mgr()->WhileEachUser(
+      phi, [block, this](Instruction* user) {
+        if (user->opcode() == spv::Op::OpPhi &&
+            context()->get_instr_block(user) == block)
+          return false;
+        return true;
+      });
 }
 
 uint32_t IfConversion::SplatCondition(analysis::Vector* vec_data_ty,
@@ -202,14 +206,15 @@ uint32_t IfConversion::SplatCondition(analysis::Vector* vec_data_ty,
   uint32_t bool_vec_id =
       context()->get_type_mgr()->GetTypeInstruction(&bool_vec_ty);
   std::vector<uint32_t> ids(vec_data_ty->element_count(), cond);
+  // TODO(1841): Handle id overflow.
   return builder->AddCompositeConstruct(bool_vec_id, ids)->result_id();
 }
 
 bool IfConversion::CheckType(uint32_t id) {
   Instruction* type = get_def_use_mgr()->GetDef(id);
-  SpvOp op = type->opcode();
-  if (spvOpcodeIsScalarType(op) || op == SpvOpTypePointer ||
-      op == SpvOpTypeVector)
+  spv::Op op = type->opcode();
+  if (spvOpcodeIsScalarType(op) || op == spv::Op::OpTypePointer ||
+      op == spv::Op::OpTypeVector)
     return true;
   return false;
 }
@@ -255,7 +260,7 @@ void IfConversion::HoistInstruction(Instruction* inst, BasicBlock* target_block,
       });
 
   Instruction* insertion_pos = target_block->terminator();
-  if ((insertion_pos)->PreviousNode()->opcode() == SpvOpSelectionMerge) {
+  if ((insertion_pos)->PreviousNode()->opcode() == spv::Op::OpSelectionMerge) {
     insertion_pos = insertion_pos->PreviousNode();
   }
   inst->RemoveFromList();

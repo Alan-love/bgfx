@@ -55,12 +55,10 @@ namespace {
 // called on each node traversed BEFORE their children.
 template <typename BBType, typename SuccessorLambda, typename PreLambda,
           typename PostLambda>
-static void DepthFirstSearch(const BBType* bb, SuccessorLambda successors,
-                             PreLambda pre, PostLambda post) {
-  // Ignore backedge operation.
-  auto nop_backedge = [](const BBType*, const BBType*) {};
+void DepthFirstSearch(const BBType* bb, SuccessorLambda successors,
+                      PreLambda pre, PostLambda post) {
   auto no_terminal_blocks = [](const BBType*) { return false; };
-  CFA<BBType>::DepthFirstTraversal(bb, successors, pre, post, nop_backedge,
+  CFA<BBType>::DepthFirstTraversal(bb, successors, pre, post,
                                    no_terminal_blocks);
 }
 
@@ -75,9 +73,8 @@ static void DepthFirstSearch(const BBType* bb, SuccessorLambda successors,
 // PostLambda - Lamdba matching the signature of 'void (const BBType*)' will be
 // called on each node traversed after their children.
 template <typename BBType, typename SuccessorLambda, typename PostLambda>
-static void DepthFirstSearchPostOrder(const BBType* bb,
-                                      SuccessorLambda successors,
-                                      PostLambda post) {
+void DepthFirstSearchPostOrder(const BBType* bb, SuccessorLambda successors,
+                               PostLambda post) {
   // Ignore preorder operation.
   auto nop_preorder = [](const BBType*) {};
   DepthFirstSearch(bb, successors, nop_preorder, post);
@@ -105,7 +102,8 @@ class BasicBlockSuccessorHelper {
   using Function = typename GetFunctionClass<BBType>::FunctionType;
 
   using BasicBlockListTy = std::vector<BasicBlock*>;
-  using BasicBlockMapTy = std::map<const BasicBlock*, BasicBlockListTy>;
+  using BasicBlockMapTy =
+      std::unordered_map<const BasicBlock*, BasicBlockListTy>;
 
  public:
   // For compliance with the dominance tree computation, entry nodes are
@@ -160,19 +158,7 @@ BasicBlockSuccessorHelper<BBType>::BasicBlockSuccessorHelper(
 template <typename BBType>
 void BasicBlockSuccessorHelper<BBType>::CreateSuccessorMap(
     Function& f, const BasicBlock* placeholder_start_node) {
-  std::map<uint32_t, BasicBlock*> id_to_BB_map;
-  auto GetSuccessorBasicBlock = [&f, &id_to_BB_map](uint32_t successor_id) {
-    BasicBlock*& Succ = id_to_BB_map[successor_id];
-    if (!Succ) {
-      for (BasicBlock& BBIt : f) {
-        if (successor_id == BBIt.id()) {
-          Succ = &BBIt;
-          break;
-        }
-      }
-    }
-    return Succ;
-  };
+  IRContext* context = f.DefInst().context();
 
   if (invert_graph_) {
     // For the post dominator tree, we see the inverted graph.
@@ -186,9 +172,8 @@ void BasicBlockSuccessorHelper<BBType>::CreateSuccessorMap(
         BasicBlockListTy& pred_list = predecessors_[&bb];
         const auto& const_bb = bb;
         const_bb.ForEachSuccessorLabel(
-            [this, &pred_list, &bb,
-             &GetSuccessorBasicBlock](const uint32_t successor_id) {
-              BasicBlock* succ = GetSuccessorBasicBlock(successor_id);
+            [this, &pred_list, &bb, context](const uint32_t successor_id) {
+              BasicBlock* succ = context->get_instr_block(successor_id);
               // Inverted graph: our successors in the CFG
               // are our predecessors in the inverted graph.
               this->successors_[succ].push_back(&bb);
@@ -209,7 +194,7 @@ void BasicBlockSuccessorHelper<BBType>::CreateSuccessorMap(
 
       const auto& const_bb = bb;
       const_bb.ForEachSuccessorLabel([&](const uint32_t successor_id) {
-        BasicBlock* succ = GetSuccessorBasicBlock(successor_id);
+        BasicBlock* succ = context->get_instr_block(successor_id);
         succ_list.push_back(succ);
         predecessors_[succ].push_back(&bb);
       });
@@ -394,6 +379,25 @@ void DominatorTree::DumpTreeAsDot(std::ostream& out_stream) const {
     return true;
   });
   out_stream << "}\n";
+}
+
+bool DominatorTree::operator==(const DominatorTree& other) const {
+  if (postdominator_ != other.postdominator_) return false;
+  if (nodes_.size() != other.nodes_.size()) return false;
+
+  for (const auto& pair : nodes_) {
+    uint32_t id = pair.first;
+    const DominatorTreeNode& node = pair.second;
+    const DominatorTreeNode* other_node = other.GetTreeNode(id);
+    if (!other_node) return false;
+
+    if ((node.parent_ == nullptr) != (other_node->parent_ == nullptr))
+      return false;
+    if (node.parent_ != nullptr) {
+      if (node.parent_->id() != other_node->parent_->id()) return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace opt

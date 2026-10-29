@@ -1,11 +1,11 @@
 /*
- * Copyright 2011-2022 Branimir Karadzic. All rights reserved.
+ * Copyright 2011-2026 Branimir Karadzic. All rights reserved.
  * License: https://github.com/bkaradzic/bgfx/blob/master/LICENSE
  */
 
 #include "bgfx_p.h"
 
-#if BGFX_CONFIG_RENDERER_DIRECT3D11 || BGFX_CONFIG_RENDERER_DIRECT3D12
+#if BGFX_CONFIG_RENDERER_DIRECT3D11 || (BGFX_CONFIG_RENDERER_DIRECT3D12 && !BX_PLATFORM_LINUX)
 
 #include "dxgi.h"
 #include "renderer_d3d.h"
@@ -16,6 +16,33 @@
 #		include <windows.ui.xaml.media.dxinterop.h>
 #	endif // BX_PLATFORM_WINRT
 #endif // !BX_PLATFORM_WINDOWS
+
+#if BX_PLATFORM_WINRT
+// Copied from <microsoft.ui.xaml.media.dxinterop.h> from Windows App SDK
+// Put in a namespace to avoid conflict with <windows.ui.xaml.media.dxinterop.h>
+namespace WinUI3
+{
+	// https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/win32/microsoft.ui.xaml.media.dxinterop/nn-microsoft-ui-xaml-media-dxinterop-iswapchainpanelnative
+	MIDL_INTERFACE("63aad0b8-7c24-40ff-85a8-640d944cc325")
+	ISwapChainPanelNative : public IUnknown
+	{
+	public:
+		virtual HRESULT STDMETHODCALLTYPE SetSwapChain(
+			/* [annotation][in] */
+			_In_  IDXGISwapChain *swapChain) = 0;
+	};
+
+	// https://learn.microsoft.com/en-us/windows/windows-app-sdk/api/win32/microsoft.ui.xaml.media.dxinterop/nn-microsoft-ui-xaml-media-dxinterop-iswapchainbackgroundpanelnative
+	MIDL_INTERFACE("24d43d84-4246-4aa7-9774-8604cb73d90d")
+	ISwapChainBackgroundPanelNative : public IUnknown
+	{
+	public:
+		virtual HRESULT STDMETHODCALLTYPE SetSwapChain(
+			/* [annotation][in] */
+			_In_  IDXGISwapChain *swapChain) = 0;
+	};
+}
+#endif // BX_PLATFORM_WINRT
 
 namespace bgfx
 {
@@ -43,6 +70,7 @@ namespace bgfx
 	static const GUID IID_IDXGIAdapter2   = { 0x0aa1ae0a, 0xfa0e, 0x4b84, { 0x86, 0x44, 0xe0, 0x5f, 0xf8, 0xe5, 0xac, 0xb5 } };
 	static const GUID IID_IDXGIAdapter3   = { 0x645967a4, 0x1392, 0x4310, { 0xa7, 0x98, 0x80, 0x53, 0xce, 0x3e, 0x93, 0xfd } };
 	static const GUID IID_IDXGIAdapter4   = { 0x3c8d99d1, 0x4fbf, 0x4181, { 0xa8, 0x2c, 0xaf, 0x66, 0xbf, 0x7b, 0xd2, 0x4e } };
+	static const GUID IID_IDXGISwapChain2 = { 0xa8be2ac4, 0x199f, 0x4946, { 0xb3, 0x31, 0x79, 0x59, 0x9f, 0xb9, 0x8d, 0xe7 } };
 	static const GUID IID_IDXGISwapChain3 = { 0x94d99bdb, 0xf1f8, 0x4ab0, { 0xb2, 0x36, 0x7d, 0xa0, 0x17, 0x0e, 0xda, 0xb1 } };
 	static const GUID IID_IDXGISwapChain4 = { 0x3d585d5a, 0xbd4a, 0x489e, { 0xb1, 0xf4, 0x3d, 0xbc, 0xb6, 0x45, 0x2f, 0xfb } };
 	static const GUID IID_IDXGIOutput6    = { 0x068346e8, 0xaaec, 0x4b84, { 0xad, 0xd7, 0x13, 0x7f, 0x51, 0x3f, 0x77, 0xa1 } };
@@ -95,7 +123,7 @@ namespace bgfx
 		DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020
 #endif // BX_PLATFORM_WINDOWS
 		;
-	BX_STATIC_ASSERT(BX_COUNTOF(s_colorSpaceStr) == kDxgiLastColorSpace+2, "Colorspace string table mismatch with DXGI_COLOR_SPACE_*.");
+	static_assert(BX_COUNTOF(s_colorSpaceStr) == kDxgiLastColorSpace+2, "Colorspace string table mismatch with DXGI_COLOR_SPACE_*.");
 
 	static const GUID s_dxgiDeviceIIDs[] =
 	{
@@ -110,6 +138,59 @@ namespace bgfx
 		IID_IDXGISwapChain4,
 		IID_IDXGISwapChain3,
 	};
+
+#if BX_PLATFORM_WINRT
+	template<typename T>
+	static bool trySetSwapChain(IInspectable* nativeWindow, Dxgi::SwapChainI* swapChain, HRESULT* hr)
+	{
+		ISwapChainPanelNative* swapChainPanelNative = NULL;
+
+		if (FAILED(nativeWindow->QueryInterface(__uuidof(T), (void**)&swapChainPanelNative) )
+		||  NULL == swapChainPanelNative)
+		{
+			return false;
+		}
+
+		*hr = swapChainPanelNative->SetSwapChain(swapChain);
+		if (SUCCEEDED(*hr) )
+		{
+			DX_RELEASE_I(swapChainPanelNative);
+		}
+		else
+		{
+			DX_RELEASE(swapChainPanelNative, 0);
+		}
+
+		return true;
+	}
+
+	static HRESULT setSwapChain(IInspectable* nativeWindow, Dxgi::SwapChainI* swapChain)
+	{
+		HRESULT hr = S_OK;
+
+		if (NULL == nativeWindow)
+		{
+			return hr;
+		}
+
+		if (trySetSwapChain<ISwapChainPanelNative>(nativeWindow, swapChain, &hr)
+		||  trySetSwapChain<ISwapChainBackgroundPanelNative>(nativeWindow, swapChain, &hr)
+		||  trySetSwapChain<WinUI3::ISwapChainPanelNative>(nativeWindow, swapChain, &hr)
+		||  trySetSwapChain<WinUI3::ISwapChainBackgroundPanelNative>(nativeWindow, swapChain, &hr))
+		{
+			if (FAILED(hr))
+			{
+				BX_TRACE("Failed to SetSwapChain, hr %x.");
+			}
+		}
+		else
+		{
+			BX_TRACE("No available interface on native window to SetSwapChain.");
+		}
+
+		return hr;
+	}
+#endif // BX_PLATFORM_WINRT
 
 	DxgiSwapChain::DxgiSwapChain()
 	{
@@ -128,15 +209,26 @@ namespace bgfx
 
 	bool Dxgi::init(Caps& _caps)
 	{
-#if BX_PLATFORM_WINDOWS
-		m_dxgiDll = bx::dlopen("dxgi.dll");
+#if BX_PLATFORM_LINUX || BX_PLATFORM_WINDOWS
+
+		const char* dxgiDllName =
+#if BX_PLATFORM_LINUX
+				"dxgi.so"
+#else
+				"dxgi.dll"
+#endif // BX_PLATFORM_LINUX
+				;
+		m_dxgiDll = bx::dlopen(dxgiDllName);
+
 		if (NULL == m_dxgiDll)
 		{
-			BX_TRACE("Init error: Failed to load dxgi.dll.");
+			BX_TRACE("Init error: Failed to load %s.", dxgiDllName);
 			return false;
 		}
 
+#	if BX_PLATFORM_WINDOWS
 		m_dxgiDebugDll = bx::dlopen("dxgidebug.dll");
+
 		if (NULL != m_dxgiDebugDll)
 		{
 			DXGIGetDebugInterface  = (PFN_GET_DEBUG_INTERFACE )bx::dlsym(m_dxgiDebugDll, "DXGIGetDebugInterface");
@@ -161,6 +253,7 @@ namespace bgfx
 			BX_TRACE("Init error: Function CreateDXGIFactory not found.");
 			return false;
 		}
+#	endif // BX_PLATFORM_WINDOWS
 #endif // BX_PLATFORM_WINDOWS
 
 		HRESULT hr = S_OK;
@@ -171,7 +264,7 @@ namespace bgfx
 		hr = CreateDXGIFactory(IID_IDXGIFactory, (void**)&m_factory);
 #endif // BX_PLATFORM_*
 
-		if (FAILED(hr) )
+		if (FAILED(hr))
 		{
 			BX_TRACE("Init error: Unable to create DXGI factory.");
 			return false;
@@ -186,7 +279,7 @@ namespace bgfx
 		{
 			AdapterI* adapter;
 			for (uint32_t ii = 0
-				; DXGI_ERROR_NOT_FOUND != m_factory->EnumAdapters(ii, reinterpret_cast<IDXGIAdapter**>(&adapter) ) && ii < BX_COUNTOF(_caps.gpu)
+				; ii < BX_COUNTOF(_caps.gpu) && DXGI_ERROR_NOT_FOUND != m_factory->EnumAdapters(ii, reinterpret_cast<IDXGIAdapter**>(&adapter) )
 				; ++ii
 				)
 			{
@@ -273,7 +366,7 @@ namespace bgfx
 						BX_TRACE("\t\t    AttachedToDesktop: %d", outputDesc.AttachedToDesktop);
 						BX_TRACE("\t\t             Rotation: %d", outputDesc.Rotation);
 
-#if BX_PLATFORM_WINDOWS
+#if BX_PLATFORM_LINUX || BX_PLATFORM_WINDOWS
 						IDXGIOutput6* output6;
 						hr = output->QueryInterface(IID_IDXGIOutput6, (void**)&output6);
 						if (SUCCEEDED(hr) )
@@ -373,62 +466,10 @@ namespace bgfx
 		DX_RELEASE_I(dxgiDevice);
 	}
 
-	static const GUID IID_ID3D12CommandQueue = { 0x0ec870a6, 0x5d7e, 0x4c22, { 0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed } };
-
-	HRESULT Dxgi::createSwapChain(IUnknown* _device, const SwapChainDesc& _scd, SwapChainI** _swapChain)
+	HRESULT Dxgi::createSwapChain(IUnknown* _device, const DxgiSwapChainDesc& _scd, SwapChainI** _swapChain)
 	{
 		HRESULT hr = S_OK;
 
-		uint32_t scdFlags = _scd.flags;
-
-#if BX_PLATFORM_WINDOWS
-		IDXGIFactory5* factory5;
-		hr = m_factory->QueryInterface(IID_IDXGIFactory5, (void**)&factory5);
-
-		if (SUCCEEDED(hr) )
-		{
-			BOOL allowTearing = false;
-			// BK - CheckFeatureSupport with DXGI_FEATURE_PRESENT_ALLOW_TEARING
-			//      will crash on pre Windows 8. Issue #1356.
-			hr = factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing) );
-			BX_TRACE("Allow tearing is %ssupported.", allowTearing ? "" : "not ");
-
-			scdFlags |= allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
-			scdFlags |= false
-				|| _scd.swapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
-				|| _scd.swapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD
-				? 0 // DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT
-				: 0
-				;
-
-			m_tearingSupported = allowTearing;
-
-			DX_RELEASE_I(factory5);
-		}
-
-		DXGI_SWAP_CHAIN_DESC scd;
-		scd.BufferDesc.Width  = _scd.width;
-		scd.BufferDesc.Height = _scd.height;
-		scd.BufferDesc.RefreshRate.Numerator   = 1;
-		scd.BufferDesc.RefreshRate.Denominator = 60;
-		scd.BufferDesc.Format = _scd.format;
-		scd.BufferDesc.ScanlineOrdering = DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED;
-		scd.BufferDesc.Scaling = DXGI_MODE_SCALING_UNSPECIFIED;
-		scd.SampleDesc.Count   = 1;
-		scd.SampleDesc.Quality = 0;
-		scd.BufferUsage  = _scd.bufferUsage;
-		scd.BufferCount  = _scd.bufferCount;
-		scd.OutputWindow = (HWND)_scd.nwh;
-		scd.Windowed     = _scd.windowed;
-		scd.SwapEffect   = _scd.swapEffect;
-		scd.Flags        = scdFlags;
-
-		hr = m_factory->CreateSwapChain(
-			  _device
-			, &scd
-			, reinterpret_cast<IDXGISwapChain**>(_swapChain)
-			);
-#else
 		DXGI_SWAP_CHAIN_DESC1 scd;
 		scd.Width  = _scd.width;
 		scd.Height = _scd.height;
@@ -441,8 +482,59 @@ namespace bgfx
 		scd.Scaling     = _scd.scaling;
 		scd.SwapEffect  = _scd.swapEffect;
 		scd.AlphaMode   = _scd.alphaMode;
-		scd.Flags       = scdFlags;
+		scd.Flags       = _scd.flags;
 
+#if BX_PLATFORM_LINUX || BX_PLATFORM_WINDOWS
+		IDXGIFactory5* factory5;
+		hr = m_factory->QueryInterface(IID_IDXGIFactory5, (void**)&factory5);
+
+		if (SUCCEEDED(hr) )
+		{
+			BOOL allowTearing = false;
+			// BK - CheckFeatureSupport with DXGI_FEATURE_PRESENT_ALLOW_TEARING
+			//      will crash on pre Windows 8. Issue #1356.
+			hr = factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing) );
+			BX_TRACE("Allow tearing is %ssupported.", allowTearing ? "" : "not ");
+
+			// DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING and the waitable object are only
+			// valid on flip-model swap chains.
+			const bool flipModel = false
+				|| DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL == _scd.swapEffect
+				|| DXGI_SWAP_EFFECT_FLIP_DISCARD    == _scd.swapEffect
+				;
+
+			scd.Flags |= allowTearing && flipModel ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+			scd.Flags |= _scd.waitable && flipModel
+				? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT
+				: 0
+				;
+
+			m_tearingSupported = allowTearing && flipModel;
+
+			DX_RELEASE_I(factory5);
+		}
+
+		const DXGI_SWAP_CHAIN_FULLSCREEN_DESC scfd =
+		{
+			.RefreshRate =
+			{
+				.Numerator   = 0,
+				.Denominator = 0,
+			},
+			.ScanlineOrdering = DXGI_MODE_SCANLINE_ORDER_UNSPECIFIED,
+			.Scaling          = DXGI_MODE_SCALING_UNSPECIFIED,
+			.Windowed         = _scd.windowed,
+		};
+
+		hr = m_factory->CreateSwapChainForHwnd(
+			  _device
+			, (HWND)_scd.nwh
+			, &scd
+			, &scfd
+			, NULL
+			, reinterpret_cast<IDXGISwapChain1**>(_swapChain)
+		);
+#else
 		if (NULL == _scd.ndt)
 		{
 			hr = m_factory->CreateSwapChainForCoreWindow(
@@ -465,65 +557,17 @@ namespace bgfx
 				, NULL
 				, reinterpret_cast<IDXGISwapChain1**>(_swapChain)
 				);
-			if (FAILED(hr) )
+			if (FAILED(hr))
 			{
 				return hr;
 			}
 
 #	if BX_PLATFORM_WINRT
-			IInspectable *nativeWindow = reinterpret_cast<IInspectable*>(_scd.nwh);
-			ISwapChainPanelNative* swapChainPanelNative;
-
-			hr = nativeWindow->QueryInterface(
-				  __uuidof(ISwapChainPanelNative)
-				, (void**)&swapChainPanelNative
-				);
-
-			if (!FAILED(hr) )
+			IInspectable* nativeWindow = reinterpret_cast<IInspectable*>(_scd.nwh);
+			hr = setSwapChain(nativeWindow, *_swapChain);
+			if (FAILED(hr) )
 			{
-				// Swap Chain Panel
-				if (NULL != swapChainPanelNative)
-				{
-					hr = swapChainPanelNative->SetSwapChain(*_swapChain);
-
-					if (FAILED(hr) )
-					{
-						DX_RELEASE(swapChainPanelNative, 0);
-						BX_TRACE("Failed to SetSwapChain, hr %x.");
-						return hr;
-					}
-
-					DX_RELEASE_I(swapChainPanelNative);
-				}
-			}
-			else
-			{
-				// Swap Chain Background Panel
-				ISwapChainBackgroundPanelNative* swapChainBackgroundPanelNative = NULL;
-
-				hr = nativeWindow->QueryInterface(
-					  __uuidof(ISwapChainBackgroundPanelNative)
-					, (void**)&swapChainBackgroundPanelNative
-					);
-
-				if (FAILED(hr) )
-				{
-					return hr;
-				}
-
-				if (NULL != swapChainBackgroundPanelNative)
-				{
-					hr = swapChainBackgroundPanelNative->SetSwapChain(*_swapChain);
-
-					if (FAILED(hr) )
-					{
-						DX_RELEASE(swapChainBackgroundPanelNative, 0);
-						BX_TRACE("Failed to SetSwapChain, hr %x.");
-						return hr;
-					}
-
-					DX_RELEASE_I(swapChainBackgroundPanelNative);
-				}
+				return hr;
 			}
 #	endif // BX_PLATFORM_WINRT
 		}
@@ -536,7 +580,7 @@ namespace bgfx
 			if (NULL != dxgiDevice1)
 			{
 				hr = dxgiDevice1->SetMaximumFrameLatency(_scd.maxFrameLatency);
-				if (FAILED(hr) )
+				if (FAILED(hr))
 				{
 					BX_TRACE("Failed to set maximum frame latency, hr 0x%08x", hr);
 					hr = S_OK;
@@ -547,11 +591,11 @@ namespace bgfx
 
 		if (FAILED(hr) )
 		{
-			BX_TRACE("Failed to create swap chain.");
+			BX_TRACE("Failed to create swap chain, hr 0x%08x.", hr);
 			return hr;
 		}
 
-#if BX_PLATFORM_WINDOWS
+#if BX_PLATFORM_LINUX || BX_PLATFORM_WINDOWS
 		if (SUCCEEDED(hr) )
 		{
 			for (uint32_t ii = 0; ii < BX_COUNTOF(s_dxgiSwapChainIIDs); ++ii)
@@ -584,76 +628,37 @@ namespace bgfx
 				}
 			}
 		}
-#endif // BX_PLATFORM_WINDOWS
+#endif // BX_PLATFORM_LINUX || BX_PLATFORM_WINDOWS
+
+		if (_scd.waitable)
+		{
+			IDXGISwapChain2* swapChain2;
+			hr = (*_swapChain)->QueryInterface(IID_IDXGISwapChain2, (void**)&swapChain2);
+
+			if (SUCCEEDED(hr) )
+			{
+				swapChain2->SetMaximumFrameLatency(bx::max<uint32_t>(1, _scd.maxFrameLatency) );
+				DX_RELEASE(swapChain2, 1);
+			}
+		}
 
 		updateHdr10(*_swapChain, _scd);
 
 		return S_OK;
 	}
 
-#if BX_PLATFORM_WINRT
-	HRESULT Dxgi::removeSwapChain(const SwapChainDesc& _scd, SwapChainI** _swapChain)
+	HRESULT Dxgi::removeSwapChain(const DxgiSwapChainDesc& _scd)
 	{
-		IInspectable *nativeWindow = reinterpret_cast<IInspectable*>(_scd.nwh);
-		ISwapChainPanelNative* swapChainPanelNative;
-
-		HRESULT hr = nativeWindow->QueryInterface(
-			  __uuidof(ISwapChainPanelNative)
-			, (void**)&swapChainPanelNative
-			);
-
-		if (SUCCEEDED(hr))
-		{
-			// Swap Chain Panel
-			if (NULL != swapChainPanelNative)
-			{
-				// Remove swap chain
-				hr = swapChainPanelNative->SetSwapChain(NULL);
-
-				if (FAILED(hr))
-				{
-					DX_RELEASE(swapChainPanelNative, 0);
-					BX_TRACE("Failed to SetSwapChain, hr %x.");
-					return hr;
-				}
-
-				DX_RELEASE_I(swapChainPanelNative);
-			}
-		}
-		else
-		{
-			// Swap Chain Background Panel
-			ISwapChainBackgroundPanelNative* swapChainBackgroundPanelNative = NULL;
-
-			hr = nativeWindow->QueryInterface(
-				__uuidof(ISwapChainBackgroundPanelNative)
-				, (void**)&swapChainBackgroundPanelNative
-			);
-
-			if (FAILED(hr))
-			{
-				return hr;
-			}
-
-			if (NULL != swapChainBackgroundPanelNative)
-			{
-				// Remove swap chain
-				hr = swapChainBackgroundPanelNative->SetSwapChain(NULL);
-
-				if (FAILED(hr))
-				{
-					DX_RELEASE(swapChainBackgroundPanelNative, 0);
-					BX_TRACE("Failed to SetSwapChain, hr %x.");
-					return hr;
-				}
-
-				DX_RELEASE_I(swapChainBackgroundPanelNative);
-			}
-		}
+#if BX_PLATFORM_WINRT
+		IInspectable* nativeWindow = reinterpret_cast<IInspectable*>(_scd.nwh);
+		return setSwapChain(nativeWindow, NULL);
+#else
+		BX_UNUSED(_scd);
+		return S_OK;
+#endif // BX_PLATFORM_WINRT
 	}
-#endif
 
-	void Dxgi::updateHdr10(SwapChainI* _swapChain, const SwapChainDesc& _scd)
+	void Dxgi::updateHdr10(SwapChainI* _swapChain, const DxgiSwapChainDesc& _scd)
 	{
 #if BX_PLATFORM_WINDOWS
 		::IDXGISwapChain4* swapChain4;
@@ -661,18 +666,27 @@ namespace bgfx
 
 		if (SUCCEEDED(hr) )
 		{
+			const bool hdr10 = true
+				&& _scd.hdr10
+				&& 0 != (g_caps.supported & BGFX_CAPS_HDR10)
+				;
+
 			const DXGI_COLOR_SPACE_TYPE colorSpace =
-				  _scd.format == DXGI_FORMAT_R10G10B10A2_UNORM  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+				  !hdr10                                        ? DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
+				: _scd.format == DXGI_FORMAT_R10G10B10A2_UNORM  ? DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
 				: _scd.format == DXGI_FORMAT_R16G16B16A16_FLOAT ? DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709
 				:                                                 DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709
 				;
 
 			hr = swapChain4->SetColorSpace1(colorSpace);
 
-			if (SUCCEEDED(hr) )
+			if (SUCCEEDED(hr)
+			&&  DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 != colorSpace)
 			{
-				DXGI_OUTPUT_DESC1 desc;
-
+				swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_NONE, 0, NULL);
+			}
+			else if (SUCCEEDED(hr) )
+			{
 				IDXGIOutput* output;
 				hr = _swapChain->GetContainingOutput(&output);
 				if (SUCCEEDED(hr) )
@@ -681,6 +695,7 @@ namespace bgfx
 					hr = output->QueryInterface(IID_IDXGIOutput6, (void**)&output6);
 					if (SUCCEEDED(hr) )
 					{
+						DXGI_OUTPUT_DESC1 desc;
 						hr = output6->GetDesc1(&desc);
 						if (SUCCEEDED(hr) )
 						{
@@ -696,6 +711,21 @@ namespace bgfx
 							BX_TRACE("\t         MinLuminance: %f", desc.MinLuminance);
 							BX_TRACE("\t         MaxLuminance: %f", desc.MaxLuminance);
 							BX_TRACE("\tMaxFullFrameLuminance: %f", desc.MaxFullFrameLuminance);
+
+							DXGI_HDR_METADATA_HDR10 metaData;
+							metaData.RedPrimary[0]   = uint16_t(desc.RedPrimary[0]   * 50000.0f);
+							metaData.RedPrimary[1]   = uint16_t(desc.RedPrimary[1]   * 50000.0f);
+							metaData.GreenPrimary[0] = uint16_t(desc.GreenPrimary[0] * 50000.0f);
+							metaData.GreenPrimary[1] = uint16_t(desc.GreenPrimary[1] * 50000.0f);
+							metaData.BluePrimary[0]  = uint16_t(desc.BluePrimary[0]  * 50000.0f);
+							metaData.BluePrimary[1]  = uint16_t(desc.BluePrimary[1]  * 50000.0f);
+							metaData.WhitePoint[0]   = uint16_t(desc.WhitePoint[0]   * 50000.0f);
+							metaData.WhitePoint[1]   = uint16_t(desc.WhitePoint[1]   * 50000.0f);
+							metaData.MaxMasteringLuminance     = uint32_t(desc.MaxLuminance * 10000.0f);
+							metaData.MinMasteringLuminance     = uint32_t(desc.MinLuminance * 10000.0f);
+							metaData.MaxContentLightLevel      = uint16_t(desc.MaxFullFrameLuminance);
+							metaData.MaxFrameAverageLightLevel = uint16_t(desc.MaxFullFrameLuminance);
+							swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(DXGI_HDR_METADATA_HDR10), &metaData);
 						}
 
 						DX_RELEASE(output6, 1);
@@ -703,21 +733,6 @@ namespace bgfx
 
 					DX_RELEASE(output, 0);
 				}
-
-				DXGI_HDR_METADATA_HDR10 hdr10;
-				hdr10.RedPrimary[0]   = uint16_t(desc.RedPrimary[0]   * 50000.0f);
-				hdr10.RedPrimary[1]   = uint16_t(desc.RedPrimary[1]   * 50000.0f);
-				hdr10.GreenPrimary[0] = uint16_t(desc.GreenPrimary[0] * 50000.0f);
-				hdr10.GreenPrimary[1] = uint16_t(desc.GreenPrimary[1] * 50000.0f);
-				hdr10.BluePrimary[0]  = uint16_t(desc.BluePrimary[0]  * 50000.0f);
-				hdr10.BluePrimary[1]  = uint16_t(desc.BluePrimary[1]  * 50000.0f);
-				hdr10.WhitePoint[0]   = uint16_t(desc.WhitePoint[0]   * 50000.0f);
-				hdr10.WhitePoint[1]   = uint16_t(desc.WhitePoint[1]   * 50000.0f);
-				hdr10.MaxMasteringLuminance     = uint32_t(desc.MaxLuminance * 10000.0f);
-				hdr10.MinMasteringLuminance     = uint32_t(desc.MinLuminance * 10000.0f);
-				hdr10.MaxContentLightLevel      = uint16_t(desc.MaxFullFrameLuminance);
-				hdr10.MaxFrameAverageLightLevel = uint16_t(desc.MaxFullFrameLuminance);
-				hr = swapChain4->SetHDRMetaData(DXGI_HDR_METADATA_TYPE_HDR10, sizeof(DXGI_HDR_METADATA_HDR10), &hdr10);
 			}
 
 			DX_RELEASE(swapChain4, 1);
@@ -727,13 +742,13 @@ namespace bgfx
 #endif // BX_PLATFORM_WINDOWS
 	}
 
-	HRESULT Dxgi::resizeBuffers(SwapChainI* _swapChain, const SwapChainDesc& _scd, const uint32_t* _nodeMask, IUnknown* const* _presentQueue)
+	HRESULT Dxgi::resizeBuffers(SwapChainI* _swapChain, const DxgiSwapChainDesc& _scd, const uint32_t* _nodeMask, IUnknown* const* _presentQueue)
 	{
 		HRESULT hr;
 
 		uint32_t scdFlags = _scd.flags;
 
-#if BX_PLATFORM_WINDOWS
+#if BX_PLATFORM_LINUX || BX_PLATFORM_WINDOWS
 		IDXGIFactory5* factory5;
 		hr = m_factory->QueryInterface(IID_IDXGIFactory5, (void**)&factory5);
 
@@ -745,11 +760,16 @@ namespace bgfx
 			hr = factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING, &allowTearing, sizeof(allowTearing));
 			BX_TRACE("Allow tearing is %ssupported.", allowTearing ? "" : "not ");
 
-			scdFlags |= allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
-			scdFlags |= false
-				|| _scd.swapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
-				|| _scd.swapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD
-				? 0 // DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT
+			// Must match the flags the swap chain was created with: tearing and the
+			// waitable object are only valid on flip-model swap chains.
+			const bool flipModel = false
+				|| DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL == _scd.swapEffect
+				|| DXGI_SWAP_EFFECT_FLIP_DISCARD    == _scd.swapEffect
+				;
+
+			scdFlags |= allowTearing && flipModel ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+			scdFlags |= _scd.waitable && flipModel
+				? DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT
 				: 0
 				;
 

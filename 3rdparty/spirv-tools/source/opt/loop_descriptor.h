@@ -28,6 +28,7 @@
 #include "source/opt/dominator_analysis.h"
 #include "source/opt/module.h"
 #include "source/opt/tree_iterator.h"
+#include "source/util/status.h"
 
 namespace spvtools {
 namespace opt {
@@ -241,12 +242,12 @@ class Loop {
   Instruction* FindConditionVariable(const BasicBlock* condition) const;
 
   // Returns the number of iterations within a loop when given the |induction|
-  // variable and the loop |condition| check. It stores the found number of
+  // variable and the loop |branch| instruction. It stores the found number of
   // iterations in the output parameter |iterations| and optionally, the step
-  // value in |step_value| and the initial value of the induction variable in
+  // value in |step_amount| and the initial value of the induction variable in
   // |init_value|.
   bool FindNumberOfIterations(const Instruction* induction,
-                              const Instruction* condition, size_t* iterations,
+                              const Instruction* branch, size_t* iterations,
                               int64_t* step_amount = nullptr,
                               int64_t* init_value = nullptr) const;
 
@@ -296,12 +297,12 @@ class Loop {
   // as a nested child loop.
   inline void SetParent(Loop* parent) { parent_ = parent; }
 
-  // Returns true is the instruction is invariant and safe to move wrt loop
-  bool ShouldHoistInstruction(IRContext* context, Instruction* inst);
+  // Returns true is the instruction is invariant and safe to move wrt loop.
+  bool ShouldHoistInstruction(const Instruction& inst) const;
 
   // Returns true if all operands of inst are in basic blocks not contained in
-  // loop
-  bool AreAllOperandsOutsideLoop(IRContext* context, Instruction* inst);
+  // loop.
+  bool AreAllOperandsOutsideLoop(const Instruction& inst) const;
 
   // Extract the initial value from the |induction| variable and store it in
   // |value|. If the function couldn't find the initial value of |induction|
@@ -316,12 +317,12 @@ class Loop {
   // Returns true if we can deduce the number of loop iterations in the step
   // operation |step|. IsSupportedCondition must also be true for the condition
   // instruction.
-  bool IsSupportedStepOp(SpvOp step) const;
+  bool IsSupportedStepOp(spv::Op step) const;
 
   // Returns true if we can deduce the number of loop iterations in the
   // condition operation |condition|. IsSupportedStepOp must also be true for
   // the step instruction.
-  bool IsSupportedCondition(SpvOp condition) const;
+  bool IsSupportedCondition(spv::Op condition) const;
 
   // Creates the list of the loop's basic block in structured order and store
   // the result in |ordered_loop_blocks|. If |include_pre_header| is true, the
@@ -335,7 +336,7 @@ class Loop {
   // Given the loop |condition|, |initial_value|, |step_value|, the trip count
   // |number_of_iterations|, and the |unroll_factor| requested, get the new
   // condition value for the residual loop.
-  static int64_t GetResidualConditionValue(SpvOp condition,
+  static int64_t GetResidualConditionValue(spv::Op condition,
                                            int64_t initial_value,
                                            int64_t step_value,
                                            size_t number_of_iterations,
@@ -400,7 +401,7 @@ class Loop {
   // the induction variable. This method will return the number of iterations in
   // a loop with those values for a given |condition|.  Returns 0 if the number
   // of iterations could not be computed.
-  int64_t GetIterations(SpvOp condition, int64_t condition_value,
+  int64_t GetIterations(spv::Op condition, int64_t condition_value,
                         int64_t init_value, int64_t step_value) const;
 
   // This is to allow for loops to be removed mid iteration without invalidating
@@ -424,6 +425,9 @@ class LoopDescriptor {
 
   using pre_iterator = TreeDFIterator<Loop>;
   using const_pre_iterator = TreeDFIterator<const Loop>;
+
+  // The status of processing a module.
+  using Status = utils::Status;
 
   // Creates a loop object for all loops found in |f|.
   LoopDescriptor(IRContext* context, const Function* f);
@@ -506,9 +510,11 @@ class LoopDescriptor {
     loops_to_add_.emplace_back(std::make_pair(parent, std::move(loop_to_add)));
   }
 
-  // Checks all loops in |this| and will create pre-headers for all loops
-  // that don't have one. Returns |true| if any blocks were created.
-  bool CreatePreHeaderBlocksIfMissing();
+  // Creates pre-header blocks for all loops in the function that do not have
+  // one. Returns `LoopDescriptor::Status::kSuccessWithChange` if any change is
+  // made, `LoopDescriptor::Status::kSuccessWithoutChange` if no change is made,
+  // and `LoopDescriptor::Status::kFailure` if it fails to create a pre-header.
+  Status CreatePreHeaderBlocksIfMissing();
 
   // Should be called to preserve the LoopAnalysis after loops have been marked
   // for addition with AddLoop or MarkLoopForRemoval.

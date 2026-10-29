@@ -9,7 +9,7 @@ SAMPLER2D(s_texOcclusionDepth, 0);
 
 BUFFER_RO(instanceDataIn, vec4, 1);
 BUFFER_RW(drawcallInstanceCount, uint, 2);
-BUFFER_WR(instancePredicates, bool, 3);
+BUFFER_WO(instancePredicates, bool, 3);
 
 uniform vec4 u_inputRTSize;
 uniform vec4 u_cullingConfig;
@@ -51,9 +51,9 @@ void main()
 			//transform World space aaBox to NDC
 			vec4 clipPos = mul( u_viewProj, vec4(boxCorners[i], 1) );
 
-#if BGFX_SHADER_LANGUAGE_GLSL 
-			clipPos.z = 0.5 * ( clipPos.z + clipPos.w );
-#endif
+#if BGFX_SHADER_LANGUAGE_GLSL
+			clipPos.z = (clipPos.z + clipPos.w*bgfx_ndc.y) * bgfx_ndc.w;
+#endif // BGFX_SHADER_LANGUAGE_GLSL
 			clipPos.z = max(clipPos.z, 0);
 
 			clipPos.xyz = clipPos.xyz / clipPos.w;
@@ -71,7 +71,7 @@ void main()
 
 		// Calculate hi-Z buffer mip
 		ivec2 size = ivec2( (maxXY - minXY) * u_inputRTSize.xy);
-		float mip = ceil(log2(max(size.x, size.y)));
+		float mip  = ceil(log2(float(max(size.x, size.y) ) ) );
 
 		mip = clamp(mip, 0, u_cullingConfig.z);
 
@@ -87,9 +87,9 @@ void main()
 			mip = level_lower;
 
 #if BGFX_SHADER_LANGUAGE_GLSL
-		boxUVs.y = 1.0 - boxUVs.y;
-		boxUVs.w = 1.0 - boxUVs.w;
-#endif
+		boxUVs.y = 0.5 - (boxUVs.y - 0.5)*bgfx_ndc.z;
+		boxUVs.w = 0.5 - (boxUVs.w - 0.5)*bgfx_ndc.z;
+#endif // BGFX_SHADER_LANGUAGE_GLSL
 		//load depths from high z buffer
 		vec4 depth =
 		{

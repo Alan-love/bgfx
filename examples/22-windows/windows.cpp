@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2022 Branimir Karadzic. All rights reserved.
+ * Copyright 2011-2026 Branimir Karadzic. All rights reserved.
  * License: https://github.com/bkaradzic/bgfx/blob/master/LICENSE
  */
 
@@ -86,11 +86,12 @@ public:
 		bgfx::Init init;
 		init.type     = args.m_type;
 		init.vendorId = args.m_pciId;
-		init.platformData.nwh  = entry::getNativeWindowHandle(entry::kDefaultWindowHandle);
-		init.platformData.ndt  = entry::getNativeDisplayHandle();
-		init.resolution.width  = m_width;
-		init.resolution.height = m_height;
-		init.resolution.reset  = m_reset;
+		init.swapChain.nwh     = entry::getNativeWindowHandle(entry::kDefaultWindowHandle);
+		init.swapChain.ndt     = entry::getNativeDisplayHandle();
+		init.platformData.type = entry::getNativeWindowHandleType();
+		init.swapChain.width  = m_width;
+		init.swapChain.height = m_height;
+		init.reset  = m_reset;
 		bgfx::init(init);
 
 		const bgfx::Caps* caps = bgfx::getCaps();
@@ -98,7 +99,7 @@ public:
 
 		if (swapChainSupported)
 		{
-			m_bindings = (InputBinding*)BX_ALLOC(entry::getAllocator(), sizeof(InputBinding)*3);
+			m_bindings = (InputBinding*)bx::alloc(entry::getAllocator(), sizeof(InputBinding)*3);
 			m_bindings[0].set(entry::Key::KeyC, entry::Modifier::None, 1, cmdCreateWindow,  this);
 			m_bindings[1].set(entry::Key::KeyD, entry::Modifier::None, 1, cmdDestroyWindow, this);
 			m_bindings[2].end();
@@ -140,11 +141,11 @@ public:
 		// Create program from shaders.
 		m_program = loadProgram("vs_cubes", "fs_cubes");
 
-		m_timeOffset = bx::getHPCounter();
-
 		bx::memSet(m_fbh, 0xff, sizeof(m_fbh) );
 
 		imguiCreate();
+
+		m_frameTime.reset();
 	}
 
 	virtual int shutdown() override
@@ -160,7 +161,7 @@ public:
 		}
 
 		inputRemoveBindings("22-windows");
-		BX_FREE(entry::getAllocator(), m_bindings);
+		bx::free(entry::getAllocator(), m_bindings);
 
 		// Cleanup.
 		bgfx::destroy(m_ibh);
@@ -177,6 +178,9 @@ public:
 	{
 		if (!entry::processWindowEvents(m_state, m_debug, m_reset) )
 		{
+			m_frameTime.frame();
+			const float time = bx::toSeconds<float>(m_frameTime.getDurationTime() );
+
 			entry::MouseState mouseState = m_state.m_mouse;
 
 			if (isValid(m_state.m_handle) )
@@ -195,12 +199,13 @@ public:
 					|| (win.m_width  != m_state.m_width
 					||  win.m_height != m_state.m_height) )
 					{
-						// When window changes size or native window handle changed
-						// frame buffer must be recreated.
-						if (bgfx::isValid(m_fbh[viewId]) )
+						if (win.m_nwh != m_state.m_nwh
+						&&  bgfx::isValid(m_fbh[viewId]) )
 						{
 							bgfx::destroy(m_fbh[viewId]);
 							m_fbh[viewId].idx = bgfx::kInvalidHandle;
+
+							bgfx::frame();
 						}
 
 						win.m_nwh    = m_state.m_nwh;
@@ -209,7 +214,19 @@ public:
 
 						if (NULL != win.m_nwh)
 						{
-							m_fbh[viewId] = bgfx::createFrameBuffer(win.m_nwh, uint16_t(win.m_width), uint16_t(win.m_height) );
+							bgfx::SwapChain swapChain;
+							swapChain.nwh    = win.m_nwh;
+							swapChain.width  = win.m_width;
+							swapChain.height = win.m_height;
+
+							if (bgfx::isValid(m_fbh[viewId]) )
+							{
+								bgfx::updateSwapChain(m_fbh[viewId], swapChain);
+							}
+							else
+							{
+								m_fbh[viewId] = bgfx::createFrameBuffer(swapChain);
+							}
 						}
 						else
 						{
@@ -272,9 +289,7 @@ public:
 				}
 			}
 
-			int64_t now = bx::getHPCounter();
-			float time = (float)( (now-m_timeOffset)/double(bx::getHPFrequency() ) );
-
+			bgfx::dbgTextClear();
 			if (NULL != m_bindings)
 			{
 				bgfx::dbgTextPrintf(0, 1, 0x2f, "Press 'c' to create or 'd' to destroy window.");
@@ -375,7 +390,7 @@ public:
 
 	InputBinding* m_bindings;
 
-	int64_t m_timeOffset;
+	FrameTime m_frameTime;
 };
 
 } // namespace

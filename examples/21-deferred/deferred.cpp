@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2022 Branimir Karadzic. All rights reserved.
+ * Copyright 2011-2026 Branimir Karadzic. All rights reserved.
  * License: https://github.com/bkaradzic/bgfx/blob/master/LICENSE
  */
 
@@ -18,8 +18,6 @@ constexpr bgfx::ViewId kRenderPassLight        = 2;
 constexpr bgfx::ViewId kRenderPassCombine      = 3;
 constexpr bgfx::ViewId kRenderPassDebugLights  = 4;
 constexpr bgfx::ViewId kRenderPassDebugGBuffer = 5;
-
-static float s_texelHalf = 0.0f;
 
 struct PosNormalTangentTexcoordVertex
 {
@@ -136,7 +134,7 @@ static const uint16_t s_cubeIndices[36] =
 	21, 23, 22,
 };
 
-void screenSpaceQuad(float _textureWidth, float _textureHeight, float _texelHalf, bool _originBottomLeft, float _width = 1.0f, float _height = 1.0f)
+void screenSpaceQuad(bool _originBottomLeft, float _width = 1.0f, float _height = 1.0f)
 {
 	if (3 == bgfx::getAvailTransientVertexBuffer(3, PosTexCoord0Vertex::ms_layout) )
 	{
@@ -149,15 +147,13 @@ void screenSpaceQuad(float _textureWidth, float _textureHeight, float _texelHalf
 		const float miny = 0.0f;
 		const float maxy = _height*2.0f;
 
-		const float texelHalfW = _texelHalf/_textureWidth;
-		const float texelHalfH = _texelHalf/_textureHeight;
-		const float minu = -1.0f + texelHalfW;
-		const float maxu =  1.0f + texelHalfH;
+		const float minu = -1.0f;
+		const float maxu =  1.0f;
 
 		const float zz = 0.0f;
 
-		float minv = texelHalfH;
-		float maxv = 2.0f + texelHalfH;
+		float minv = 0.0f;
+		float maxv = 2.0f;
 
 		if (_originBottomLeft)
 		{
@@ -211,11 +207,12 @@ public:
 		bgfx::Init init;
 		init.type     = args.m_type;
 		init.vendorId = args.m_pciId;
-		init.platformData.nwh  = entry::getNativeWindowHandle(entry::kDefaultWindowHandle);
-		init.platformData.ndt  = entry::getNativeDisplayHandle();
-		init.resolution.width  = m_width;
-		init.resolution.height = m_height;
-		init.resolution.reset  = m_reset;
+		init.swapChain.nwh     = entry::getNativeWindowHandle(entry::kDefaultWindowHandle);
+		init.swapChain.ndt     = entry::getNativeDisplayHandle();
+		init.platformData.type = entry::getNativeWindowHandleType();
+		init.swapChain.width  = m_width;
+		init.swapChain.height = m_height;
+		init.reset  = m_reset;
 		bgfx::init(init);
 
 		// Enable m_debug text.
@@ -289,18 +286,9 @@ public:
 		m_useTArray = false;
 		m_useUav = false;
 
-		if (0 != (BGFX_CAPS_TEXTURE_2D_ARRAY & bgfx::getCaps()->supported) )
-		{
-			m_lightTaProgram   = loadProgram("vs_deferred_light",   "fs_deferred_light_ta");
-			m_combineTaProgram = loadProgram("vs_deferred_combine", "fs_deferred_combine_ta");
-			m_debugTaProgram   = loadProgram("vs_deferred_debug",   "fs_deferred_debug_ta");
-		}
-		else
-		{
-			m_lightTaProgram   = BGFX_INVALID_HANDLE;
-			m_combineTaProgram = BGFX_INVALID_HANDLE;
-			m_debugTaProgram   = BGFX_INVALID_HANDLE;
-		}
+		m_lightTaProgram   = loadProgram("vs_deferred_light",   "fs_deferred_light_ta");
+		m_combineTaProgram = loadProgram("vs_deferred_combine", "fs_deferred_combine_ta");
+		m_debugTaProgram   = loadProgram("vs_deferred_debug",   "fs_deferred_debug_ta");
 
 		if (0 != (BGFX_CAPS_IMAGE_RW & bgfx::getCaps()->supported)
 		&&  0 != (BGFX_CAPS_FORMAT_TEXTURE_IMAGE_READ & bgfx::getCaps()->formats[bgfx::TextureFormat::RGBA8])
@@ -332,10 +320,6 @@ public:
 		// Imgui.
 		imguiCreate();
 
-		m_timeOffset = bx::getHPCounter();
-		const bgfx::RendererType::Enum renderer = bgfx::getRendererType();
-		s_texelHalf = bgfx::RendererType::Direct3D9 == renderer ? 0.5f : 0.0f;
-
 		// Get renderer capabilities info.
 		m_caps = bgfx::getCaps();
 
@@ -354,6 +338,8 @@ public:
 
 		cameraSetPosition({ 0.0f, 0.0f, -15.0f });
 		cameraSetVerticalAngle(0.0f);
+
+		m_frameTime.reset();
 	}
 
 	virtual int shutdown() override
@@ -435,6 +421,10 @@ public:
 	{
 		if (!entry::processEvents(m_width, m_height, m_debug, m_reset, &m_mouseState) )
 		{
+			m_frameTime.frame();
+			const float time      = bx::toSeconds<float>(m_frameTime.getDurationTime() );
+			const float deltaTime = bx::toSeconds<float>(m_frameTime.getDeltaTime() );
+
 			imguiBeginFrame(m_mouseState.m_mx
 				, m_mouseState.m_my
 				, (m_mouseState.m_buttons[entry::MouseButton::Left  ] ? IMGUI_MBUT_LEFT   : 0)
@@ -446,15 +436,6 @@ public:
 				);
 
 			showExampleDialog(this);
-
-			int64_t now = bx::getHPCounter();
-			static int64_t last = now;
-			const int64_t frameTime = now - last;
-			last = now;
-			const double freq = double(bx::getHPFrequency() );
-			const float deltaTime = float(frameTime/freq);
-
-			float time = (float)( (now-m_timeOffset)/freq);
 
 			ImGui::SetNextWindowPos(
 				  ImVec2(m_width - m_width / 5.0f - 10.0f, 10.0f)
@@ -562,7 +543,7 @@ public:
 						;
 
 					m_gbufferTex[2] = bgfx::createTexture2D(uint16_t(m_width), uint16_t(m_height), false, 1, depthFormat, BGFX_TEXTURE_RT | tsFlags);
-					gbufferAt[2].init(m_gbufferTex[2]);
+					gbufferAt[2].init(m_gbufferTex[2], bgfx::Access::Write, 0, 1, 0, BGFX_ATTACHMENT_NONE);
 
 					m_gbuffer = bgfx::createFrameBuffer(BX_COUNTOF(gbufferAt), gbufferAt, true);
 
@@ -689,7 +670,7 @@ public:
 				// Clear UAV texture
 				if (m_useUav)
 				{
-					screenSpaceQuad( (float)m_width, (float)m_height, s_texelHalf, m_caps->originBottomLeft);
+					screenSpaceQuad(m_caps->originBottomLeft);
 					bgfx::setViewFrameBuffer(kRenderPassClearUav, BGFX_INVALID_HANDLE);
 					bgfx::setState(0);
 					bgfx::setImage(2, m_lightBufferTex, 0, bgfx::Access::ReadWrite, bgfx::TextureFormat::RGBA8);
@@ -816,7 +797,7 @@ public:
 							| BGFX_STATE_WRITE_A
 							| BGFX_STATE_BLEND_ADD
 							);
-						screenSpaceQuad( (float)m_width, (float)m_height, s_texelHalf, m_caps->originBottomLeft);
+						screenSpaceQuad(m_caps->originBottomLeft);
 
 						if (bgfx::isValid(m_lightTaProgram)
 						&&  m_useTArray)
@@ -845,7 +826,7 @@ public:
 					| BGFX_STATE_WRITE_RGB
 					| BGFX_STATE_WRITE_A
 					);
-				screenSpaceQuad( (float)m_width, (float)m_height, s_texelHalf, m_caps->originBottomLeft);
+				screenSpaceQuad(m_caps->originBottomLeft);
 
 				if (bgfx::isValid(m_lightTaProgram)
 				&&  m_useTArray)
@@ -894,6 +875,9 @@ public:
 			}
 
 			imguiEndFrame();
+
+			// Just flush work, but do not present.
+			bgfx::frame(BGFX_FRAME_FLUSH);
 
 			// Advance to next frame. Rendering thread will be kicked to
 			// process submitted rendering primitives.
@@ -963,7 +947,8 @@ public:
 	entry::MouseState m_mouseState;
 
 	const bgfx::Caps* m_caps;
-	int64_t m_timeOffset;
+
+	FrameTime m_frameTime;
 };
 
 } // namespace

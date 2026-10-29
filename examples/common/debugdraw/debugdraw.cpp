@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2022 Branimir Karadzic. All rights reserved.
+ * Copyright 2011-2026 Branimir Karadzic. All rights reserved.
  * License: https://github.com/bkaradzic/bgfx/blob/master/LICENSE
  */
 
@@ -13,7 +13,6 @@
 #include <bx/mutex.h>
 #include <bx/math.h>
 #include <bx/sort.h>
-#include <bx/uint32_t.h>
 #include <bx/handlealloc.h>
 
 #ifndef DEBUG_DRAW_CONFIG_MAX_GEOMETRY
@@ -290,7 +289,7 @@ uint32_t genSphere(uint8_t _subdiv0, void* _pos0 = NULL, uint16_t _posStride0 = 
 		} gen(_pos0, _posStride0, _normals0, _normalStride0, _subdiv0);
 	}
 
-	uint32_t numVertices = 20*3*bx::uint32_max(1, (uint32_t)bx::pow(4.0f, _subdiv0) );
+	uint32_t numVertices = 20*3*bx::max(1, (uint32_t)bx::pow(4.0f, _subdiv0) );
 	return numVertices;
 }
 
@@ -640,11 +639,11 @@ struct DebugDrawShared
 			const uint32_t numVertices = genSphere(tess);
 			const uint32_t numIndices  = numVertices;
 
-			vertices[id] = BX_ALLOC(m_allocator, numVertices*stride);
+			vertices[id] = bx::alloc(m_allocator, numVertices*stride);
 			bx::memSet(vertices[id], 0, numVertices*stride);
 			genSphere(tess, vertices[id], stride);
 
-			uint16_t* trilist = (uint16_t*)BX_ALLOC(m_allocator, numIndices*sizeof(uint16_t) );
+			uint16_t* trilist = (uint16_t*)bx::alloc(m_allocator, numIndices*sizeof(uint16_t) );
 			for (uint32_t ii = 0; ii < numIndices; ++ii)
 			{
 				trilist[ii] = uint16_t(ii);
@@ -658,7 +657,7 @@ struct DebugDrawShared
 				, numIndices
 				, false
 				);
-			indices[id] = (uint16_t*)BX_ALLOC(m_allocator, (numIndices + numLineListIndices)*sizeof(uint16_t) );
+			indices[id] = (uint16_t*)bx::alloc(m_allocator, (numIndices + numLineListIndices)*sizeof(uint16_t) );
 			uint16_t* indicesOut = indices[id];
 			bx::memCopy(indicesOut, trilist, numIndices*sizeof(uint16_t) );
 
@@ -681,7 +680,7 @@ struct DebugDrawShared
 			startVertex += numVertices;
 			startIndex  += numIndices + numLineListIndices;
 
-			BX_FREE(m_allocator, trilist);
+			bx::free(m_allocator, trilist);
 		}
 
 		for (uint32_t mesh = 0; mesh < 4; ++mesh)
@@ -695,8 +694,8 @@ struct DebugDrawShared
 			const uint32_t numIndices  = num*6;
 			const uint32_t numLineListIndices = num*4;
 
-			vertices[id] = BX_ALLOC(m_allocator, numVertices*stride);
-			indices[id]  = (uint16_t*)BX_ALLOC(m_allocator, (numIndices + numLineListIndices)*sizeof(uint16_t) );
+			vertices[id] = bx::alloc(m_allocator, numVertices*stride);
+			indices[id]  = (uint16_t*)bx::alloc(m_allocator, (numIndices + numLineListIndices)*sizeof(uint16_t) );
 			bx::memSet(indices[id], 0, (numIndices + numLineListIndices)*sizeof(uint16_t) );
 
 			DebugShapeVertex* vertex = (DebugShapeVertex*)vertices[id];
@@ -756,8 +755,8 @@ struct DebugDrawShared
 			const uint32_t numIndices  = num*12;
 			const uint32_t numLineListIndices = num*6;
 
-			vertices[id] = BX_ALLOC(m_allocator, numVertices*stride);
-			indices[id]  = (uint16_t*)BX_ALLOC(m_allocator, (numIndices + numLineListIndices)*sizeof(uint16_t) );
+			vertices[id] = bx::alloc(m_allocator, numVertices*stride);
+			indices[id]  = (uint16_t*)bx::alloc(m_allocator, (numIndices + numLineListIndices)*sizeof(uint16_t) );
 			bx::memSet(indices[id], 0, (numIndices + numLineListIndices)*sizeof(uint16_t) );
 
 			DebugShapeVertex* vertex = (DebugShapeVertex*)vertices[id];
@@ -826,8 +825,8 @@ struct DebugDrawShared
 			const uint32_t numIndices  = num*6;
 			const uint32_t numLineListIndices = num*6;
 
-			vertices[id] = BX_ALLOC(m_allocator, numVertices*stride);
-			indices[id]  = (uint16_t*)BX_ALLOC(m_allocator, (numIndices + numLineListIndices)*sizeof(uint16_t) );
+			vertices[id] = bx::alloc(m_allocator, numVertices*stride);
+			indices[id]  = (uint16_t*)bx::alloc(m_allocator, (numIndices + numLineListIndices)*sizeof(uint16_t) );
 			bx::memSet(indices[id], 0, (numIndices + numLineListIndices)*sizeof(uint16_t) );
 
 			DebugShapeVertex* vertex = (DebugShapeVertex*)vertices[id];
@@ -919,8 +918,8 @@ struct DebugDrawShared
 				 , (m_mesh[id].m_numIndices[0]+m_mesh[id].m_numIndices[1])*sizeof(uint16_t)
 				 );
 
-			BX_FREE(m_allocator, vertices[id]);
-			BX_FREE(m_allocator, indices[id]);
+			bx::free(m_allocator, vertices[id]);
+			bx::free(m_allocator, indices[id]);
 		}
 
 		bx::memCopy(&vb->data[m_mesh[DebugMesh::Quad].m_startVertex * stride]
@@ -1133,9 +1132,9 @@ struct DebugDrawEncoderImpl
 
 		bgfx::Transform transform;
 		stack.mtx  = m_encoder->allocTransform(&transform, _num);
-		stack.num  = _num;
+		stack.num  = transform.num;
 		stack.data = transform.data;
-		bx::memCopy(transform.data, _mtx, _num*64);
+		bx::memCopy(transform.data, _mtx, transform.num*64);
 	}
 
 	void setTranslate(float _x, float _y, float _z)
@@ -1169,7 +1168,7 @@ struct DebugDrawEncoderImpl
 		}
 		else
 		{
-			mtx = (float*)alloca(_num*64);
+			mtx = (float*)BX_STACK_ALLOC(_num*64);
 			for (uint16_t ii = 0; ii < _num; ++ii)
 			{
 				const float* mtxTransform = (const float*)_mtx;
@@ -1505,7 +1504,7 @@ struct DebugDrawEncoderImpl
 		}
 		else
 		{
-			BX_STATIC_ASSERT(sizeof(DdVertex) == sizeof(bx::Vec3), "");
+			static_assert(sizeof(DdVertex) == sizeof(bx::Vec3), "");
 
 			uint64_t old = attrib.m_state;
 			attrib.m_state &= ~BGFX_STATE_CULL_MASK;
@@ -1650,8 +1649,8 @@ struct DebugDrawEncoderImpl
 
 	void drawFrustum(const float* _viewProj)
 	{
-		bx::Plane planes[6] = { bx::init::None, bx::init::None, bx::init::None, bx::init::None, bx::init::None, bx::init::None };
-		buildFrustumPlanes(planes, _viewProj);
+		bx::Plane planes[6] = { bx::InitNone, bx::InitNone, bx::InitNone, bx::InitNone, bx::InitNone, bx::InitNone };
+		buildFrustumPlanes(planes, _viewProj, bgfx::getCaps()->homogeneousDepth);
 
 		const bx::Vec3 points[8] =
 		{
@@ -1747,8 +1746,8 @@ struct DebugDrawEncoderImpl
 		const float step = bx::kPi * 2.0f / num;
 		_weight = bx::clamp(_weight, 0.0f, 2.0f);
 
-		bx::Vec3 udir(bx::init::None);
-		bx::Vec3 vdir(bx::init::None);
+		bx::Vec3 udir(bx::InitNone);
+		bx::Vec3 vdir(bx::InitNone);
 		bx::calcTangentFrame(udir, vdir, _normal, attrib.m_spin);
 
 		float xy0[2];
@@ -1819,8 +1818,8 @@ struct DebugDrawEncoderImpl
 		const Attrib& attrib = m_attrib[m_stack];
 		if (attrib.m_wireframe)
 		{
-			bx::Vec3 udir(bx::init::None);
-			bx::Vec3 vdir(bx::init::None);
+			bx::Vec3 udir(bx::InitNone);
+			bx::Vec3 vdir(bx::InitNone);
 			bx::calcTangentFrame(udir, vdir, _normal, attrib.m_spin);
 
 			const float halfExtent = _size*0.5f;
@@ -1861,8 +1860,8 @@ struct DebugDrawEncoderImpl
 
 		const Attrib& attrib = m_attrib[m_stack];
 
-		bx::Vec3 udir(bx::init::None);
-		bx::Vec3 vdir(bx::init::None);
+		bx::Vec3 udir(bx::InitNone);
+		bx::Vec3 vdir(bx::InitNone);
 		bx::calcTangentFrame(udir, vdir, _normal, attrib.m_spin);
 
 		const Pack2D& pack = s_dds.m_sprite.get(_handle);
@@ -1982,8 +1981,8 @@ struct DebugDrawEncoderImpl
 		if (_thickness > 0.0f)
 		{
 			const bx::Vec3 from = { _x, _y, _z };
-			bx::Vec3 mid(bx::init::None);
-			bx::Vec3 to(bx::init::None);
+			bx::Vec3 mid(bx::InitNone);
+			bx::Vec3 to(bx::InitNone);
 
 			setColor(Axis::X == _highlight ? 0xff00ffff : 0xff0000ff);
 			mid = { _x + _len - _thickness, _y, _z };
@@ -2025,8 +2024,8 @@ struct DebugDrawEncoderImpl
 	{
 		const Attrib& attrib = m_attrib[m_stack];
 
-		bx::Vec3 udir(bx::init::None);
-		bx::Vec3 vdir(bx::init::None);
+		bx::Vec3 udir(bx::InitNone);
+		bx::Vec3 vdir(bx::InitNone);
 		bx::calcTangentFrame(udir, vdir, _normal, attrib.m_spin);
 
 		udir = bx::mul(udir, _step);
@@ -2241,7 +2240,7 @@ struct DebugDrawEncoderImpl
 	static const uint32_t kCacheSize = 1024;
 	static const uint32_t kStackSize = 16;
 	static const uint32_t kCacheQuadSize = 1024;
-	BX_STATIC_ASSERT(kCacheSize >= 3, "Cache must be at least 3 elements.");
+	static_assert(kCacheSize >= 3, "Cache must be at least 3 elements.");
 
 	DebugVertex   m_cache[kCacheSize+1];
 	DebugUvVertex m_cacheQuad[kCacheQuadSize];
@@ -2281,7 +2280,7 @@ struct DebugDrawEncoderImpl
 };
 
 static DebugDrawEncoderImpl s_dde;
-BX_STATIC_ASSERT(sizeof(DebugDrawEncoderImpl) <= sizeof(DebugDrawEncoder), "Size must match");
+static_assert(sizeof(DebugDrawEncoderImpl) <= sizeof(DebugDrawEncoder), "Size must match");
 
 void ddInit(bx::AllocatorI* _allocator)
 {

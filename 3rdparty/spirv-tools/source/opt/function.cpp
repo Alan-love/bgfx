@@ -15,9 +15,7 @@
 #include "source/opt/function.h"
 
 #include <ostream>
-#include <sstream>
 
-#include "function.h"
 #include "ir_context.h"
 #include "source/util/bit_vector.h"
 
@@ -42,6 +40,10 @@ Function* Function::Clone(IRContext* ctx) const {
   clone->blocks_.reserve(blocks_.size());
   for (const auto& b : blocks_) {
     std::unique_ptr<BasicBlock> bb(b->Clone(ctx));
+    if (!bb) {
+      delete clone;
+      return nullptr;
+    }
     clone->AddBasicBlock(std::move(bb));
   }
 
@@ -264,11 +266,19 @@ std::string Function::PrettyPrint(uint32_t options) const {
   std::ostringstream str;
   ForEachInst([&str, options](const Instruction* inst) {
     str << inst->PrettyPrint(options);
-    if (inst->opcode() != SpvOpFunctionEnd) {
+    if (inst->opcode() != spv::Op::OpFunctionEnd) {
       str << std::endl;
     }
   });
   return str.str();
 }
+
+void Function::ReorderBasicBlocksInStructuredOrder() {
+  std::list<BasicBlock*> order;
+  IRContext* context = this->def_inst_->context();
+  context->cfg()->ComputeStructuredOrder(this, blocks_[0].get(), &order);
+  ReorderBasicBlocks(order.begin(), order.end());
+}
+
 }  // namespace opt
 }  // namespace spvtools

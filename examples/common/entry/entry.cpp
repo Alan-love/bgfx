@@ -1,11 +1,13 @@
 /*
- * Copyright 2011-2022 Branimir Karadzic. All rights reserved.
+ * Copyright 2011-2026 Branimir Karadzic. All rights reserved.
  * License: https://github.com/bkaradzic/bgfx/blob/master/LICENSE
  */
 
 #include <bx/bx.h>
+#include <bx/commandline.h>
 #include <bx/file.h>
 #include <bx/sort.h>
+#include <bx/timer.h>
 #include <bgfx/bgfx.h>
 
 #include <time.h>
@@ -28,15 +30,36 @@ namespace entry
 	static uint32_t s_height = ENTRY_DEFAULT_HEIGHT;
 	static bool s_exit = false;
 
+	WindowState s_window[ENTRY_CONFIG_MAX_WINDOWS];
+
+	static void resetMainWindow(uint32_t _width, uint32_t _height, uint32_t _reset)
+	{
+		constexpr uint32_t kSwapChainFlags = 0
+			| BGFX_SWAP_CHAIN_FULLSCREEN_MASK
+			| BGFX_SWAP_CHAIN_MSAA_MASK
+			| BGFX_SWAP_CHAIN_SRGB_BACKBUFFER
+			| BGFX_SWAP_CHAIN_HDR10
+			| BGFX_SWAP_CHAIN_HIDPI
+			| BGFX_SWAP_CHAIN_TRANSPARENT_BACKBUFFER
+			;
+
+		bgfx::SwapChain swapChain;
+		swapChain.width  = _width;
+		swapChain.height = _height;
+		swapChain.flags  = _reset &  kSwapChainFlags;
+		swapChain.nwh    = s_window[0].m_nwh;
+
+		bgfx::reset(_reset & ~kSwapChainFlags, &swapChain);
+	}
+
 	static bx::FileReaderI* s_fileReader = NULL;
 	static bx::FileWriterI* s_fileWriter = NULL;
 
 	extern bx::AllocatorI* getDefaultAllocator();
 	bx::AllocatorI* g_allocator = getDefaultAllocator();
 
-	typedef bx::StringT<&g_allocator> String;
-
-	static String s_currentDir;
+	using FixedString4096 = bx::FixedStringT<4096>;
+	static FixedString4096 s_currentDir;
 
 	class FileReader : public bx::FileReader
 	{
@@ -45,9 +68,10 @@ namespace entry
 	public:
 		virtual bool open(const bx::FilePath& _filePath, bx::Error* _err) override
 		{
-			String filePath(s_currentDir);
+			FixedString4096 filePath(s_currentDir);
 			filePath.append(_filePath);
-			return super::open(filePath.getPtr(), _err);
+
+			return super::open(filePath.getCPtr(), _err);
 		}
 	};
 
@@ -58,9 +82,9 @@ namespace entry
 	public:
 		virtual bool open(const bx::FilePath& _filePath, bool _append, bx::Error* _err) override
 		{
-			String filePath(s_currentDir);
-			filePath.append(_filePath);
-			return super::open(filePath.getPtr(), _append, _err);
+			bx::FilePath filePath(s_currentDir);
+			filePath.join(_filePath);
+			return super::open(filePath.getCPtr(), _append, _err);
 		}
 	};
 
@@ -185,7 +209,7 @@ BX_PRAGMA_DIAGNOSTIC_POP();
 		"GamepadStart",
 		"GamepadGuide",
 	};
-	BX_STATIC_ASSERT(Key::Count == BX_COUNTOF(s_keyName) );
+	static_assert(Key::Count == BX_COUNTOF(s_keyName) );
 
 	const char* getName(Key::Enum _key)
 	{
@@ -288,7 +312,6 @@ BX_PRAGMA_DIAGNOSTIC_POP();
 			||  setOrToggle(s_reset, "flush",       BGFX_RESET_FLUSH_AFTER_RENDER, 1, _argc, _argv)
 			||  setOrToggle(s_reset, "flip",        BGFX_RESET_FLIP_AFTER_RENDER,  1, _argc, _argv)
 			||  setOrToggle(s_reset, "hidpi",       BGFX_RESET_HIDPI,              1, _argc, _argv)
-			||  setOrToggle(s_reset, "depthclamp",  BGFX_RESET_DEPTH_CLAMP,        1, _argc, _argv)
 			   )
 			{
 				return bx::kExitSuccess;
@@ -375,7 +398,13 @@ BX_PRAGMA_DIAGNOSTIC_POP();
 	static AppI*    s_apps       = NULL;
 	static uint32_t s_numApps    = 0;
 
+	static char s_restartApp[1024] = { '\0' };
 	static char s_restartArgs[1024] = { '\0' };
+
+	void setRestartArgs(const char* _args)
+	{
+		bx::strCopy(s_restartArgs, BX_COUNTOF(s_restartArgs), _args);
+	}
 
 	static AppI* getCurrentApp(AppI* _set = NULL)
 	{
@@ -408,14 +437,14 @@ BX_PRAGMA_DIAGNOSTIC_POP();
 		{
 			if (2 == _argc)
 			{
-				bx::strCopy(s_restartArgs, BX_COUNTOF(s_restartArgs), getCurrentApp()->getName() );
+				bx::strCopy(s_restartApp, BX_COUNTOF(s_restartApp), getCurrentApp()->getName() );
 				return bx::kExitSuccess;
 			}
 
 			if (0 == bx::strCmp(_argv[2], "next") )
 			{
 				AppI* next = getNextWrap(getCurrentApp() );
-				bx::strCopy(s_restartArgs, BX_COUNTOF(s_restartArgs), next->getName() );
+				bx::strCopy(s_restartApp, BX_COUNTOF(s_restartApp), next->getName() );
 				return bx::kExitSuccess;
 			}
 			else if (0 == bx::strCmp(_argv[2], "prev") )
@@ -426,7 +455,7 @@ BX_PRAGMA_DIAGNOSTIC_POP();
 					prev = app;
 				}
 
-				bx::strCopy(s_restartArgs, BX_COUNTOF(s_restartArgs), prev->getName() );
+				bx::strCopy(s_restartApp, BX_COUNTOF(s_restartApp), prev->getName() );
 				return bx::kExitSuccess;
 			}
 
@@ -434,7 +463,7 @@ BX_PRAGMA_DIAGNOSTIC_POP();
 			{
 				if (0 == bx::strCmp(_argv[2], app->getName() ) )
 				{
-					bx::strCopy(s_restartArgs, BX_COUNTOF(s_restartArgs), app->getName() );
+					bx::strCopy(s_restartApp, BX_COUNTOF(s_restartApp), app->getName() );
 					return bx::kExitSuccess;
 				}
 			}
@@ -455,7 +484,7 @@ BX_PRAGMA_DIAGNOSTIC_POP();
 
 	AppI::AppI(const char* _name, const char* _description, const char* _url)
 	{
-		BX_STATIC_ASSERT(sizeof(AppInternal) <= sizeof(m_internal) );
+		static_assert(sizeof(AppInternal) <= sizeof(m_internal) );
 		s_offset = BX_OFFSETOF(AppI, m_internal);
 
 		AppInternal* ai = (AppInternal*)m_internal;
@@ -528,12 +557,86 @@ BX_PRAGMA_DIAGNOSTIC_POP();
 		return s_numApps;
 	}
 
+	static bx::Ticks s_fixedTimeStep = bx::InitZero;
+
+	bx::Ticks getFixedTimeStep()
+	{
+		return s_fixedTimeStep;
+	}
+
+	///
+	struct TestRun
+	{
+		TestRun(int _argc, const char* const* _argv)
+			: m_frame(0)
+			, m_screenshotFrame(0)
+		{
+			bx::CommandLine cmdLine(_argc, _argv);
+
+			const char* screenshot = cmdLine.findOption("screenshot");
+			if (NULL != screenshot)
+			{
+				bx::strCopy(m_screenshot, sizeof(m_screenshot), screenshot);
+				m_screenshotFrame = 60;
+
+				const char* frame = cmdLine.findOption("screenshot-frame");
+				if (NULL != frame)
+				{
+					bx::fromString(&m_screenshotFrame, frame);
+				}
+			}
+
+			uint32_t fps = 0 != m_screenshotFrame ? 60 : 0;
+			const char* fixedFps = cmdLine.findOption("fixed-fps");
+			if (NULL != fixedFps)
+			{
+				bx::fromString(&fps, fixedFps);
+			}
+
+			s_fixedTimeStep = 0 != fps
+				? bx::Ticks(bx::Ticks::s_kFreq.ticks/fps)
+				: bx::Ticks(bx::InitZero)
+				;
+		}
+
+		///
+		bool frame()
+		{
+			if (0 == m_screenshotFrame)
+			{
+				return true;
+			}
+
+			++m_frame;
+
+			if (m_frame == m_screenshotFrame)
+			{
+				bgfx::requestScreenShot(BGFX_INVALID_HANDLE, m_screenshot);
+			}
+
+			return m_frame < m_screenshotFrame + 3;
+		}
+
+		uint32_t m_frame;
+		uint32_t m_screenshotFrame;
+		char     m_screenshot[bx::kMaxFilePath];
+	};
+
 	int runApp(AppI* _app, int _argc, const char* const* _argv)
 	{
+		setWindowSize(kDefaultWindowHandle, s_width, s_height);
+
+		bx::FilePath fp(_argv[0]);
+		char title[bx::kMaxFilePath];
+		const bx::StringView exeName(fp.getBaseName() );
+
+		bx::snprintf(title, BX_COUNTOF(title), "%S - %s", &exeName, _app->getName() );
+		setWindowTitle(kDefaultWindowHandle, title);
+
+		TestRun test(_argc, _argv);
+
 		_app->init(_argc, _argv, s_width, s_height);
 		bgfx::frame();
-
-		setWindowSize(kDefaultWindowHandle, s_width, s_height);
 
 #if BX_PLATFORM_EMSCRIPTEN
 		s_app = _app;
@@ -541,7 +644,8 @@ BX_PRAGMA_DIAGNOSTIC_POP();
 #else
 		while (_app->update() )
 		{
-			if (0 != bx::strLen(s_restartArgs) )
+			if (0 != bx::strLen(s_restartApp)
+			||  !test.frame() )
 			{
 				break;
 			}
@@ -566,7 +670,7 @@ BX_PRAGMA_DIAGNOSTIC_POP();
 			return;
 		}
 
-		AppI** apps = (AppI**)BX_ALLOC(g_allocator, s_numApps*sizeof(AppI*) );
+		AppI** apps = (AppI**)bx::alloc(g_allocator, s_numApps*sizeof(AppI*) );
 
 		uint32_t ii = 0;
 		for (AppI* app = getFirstApp(); NULL != app; app = app->getNext() )
@@ -589,12 +693,13 @@ BX_PRAGMA_DIAGNOSTIC_POP();
 			ai->m_next = NULL;
 		}
 
-		BX_FREE(g_allocator, apps);
+		bx::free(g_allocator, apps);
 	}
 
 	int main(int _argc, const char* const* _argv)
 	{
 		//DBG(BX_COMPILER_NAME " / " BX_CPU_NAME " / " BX_ARCH_NAME " / " BX_PLATFORM_NAME);
+		bx::installExceptionHandler();
 
 		s_fileReader = BX_NEW(g_allocator, FileReader);
 		s_fileWriter = BX_NEW(g_allocator, FileWriter);
@@ -633,29 +738,55 @@ restart:
 			{
 				selected = app;
 			}
-#if 0
-			DBG("%c %s, %s"
-				, app == selected ? '>' : ' '
-				, app->getName()
-				, app->getDescription()
-				);
-#endif // 0
 		}
 
 		int32_t result = bx::kExitSuccess;
-		s_restartArgs[0] = '\0';
-		if (0 == s_numApps)
-		{
-			result = ::_main_(_argc, (char**)_argv);
-		}
-		else
-		{
-			result = runApp(getCurrentApp(selected), _argc, _argv);
-		}
+		s_restartApp[0] = '\0';
+
+		char  extraArgsBuf[256];
+		char  tokenBuf[256];
+		char* extraArgv[32];
+		const char* restartArgv[64];
+
+		int argc = _argc;
+		const char* const* argv = _argv;
 
 		if (0 != bx::strLen(s_restartArgs) )
 		{
-			find = s_restartArgs;
+			bx::strCopy(extraArgsBuf, BX_COUNTOF(extraArgsBuf), s_restartArgs);
+
+			int restartArgc = 0;
+
+			if (0 < _argc)
+			{
+				restartArgv[restartArgc++] = _argv[0];
+			}
+
+			int extraArgc;
+			uint32_t tokenBufSize = sizeof(tokenBuf);
+			bx::tokenizeCommandLine(extraArgsBuf, tokenBuf, tokenBufSize, extraArgc, extraArgv, BX_COUNTOF(extraArgv) );
+
+			for (int ii = 0; ii < extraArgc && restartArgc < (int)BX_COUNTOF(restartArgv) - 1; ++ii)
+			{
+				restartArgv[restartArgc++] = extraArgv[ii];
+			}
+
+			argc = restartArgc;
+			argv = restartArgv;
+		}
+
+		if (0 == s_numApps)
+		{
+			result = ::_main_(argc, (char**)argv);
+		}
+		else
+		{
+			result = runApp(getCurrentApp(selected), argc, argv);
+		}
+
+		if (0 != bx::strLen(s_restartApp) )
+		{
+			find = s_restartApp;
 			goto restart;
 		}
 
@@ -666,16 +797,14 @@ restart:
 
 		cmdShutdown();
 
-		BX_DELETE(g_allocator, s_fileReader);
+		bx::deleteObject(g_allocator, s_fileReader);
 		s_fileReader = NULL;
 
-		BX_DELETE(g_allocator, s_fileWriter);
+		bx::deleteObject(g_allocator, s_fileWriter);
 		s_fileWriter = NULL;
 
 		return result;
 	}
-
-	WindowState s_window[ENTRY_CONFIG_MAX_WINDOWS];
 
 	bool processEvents(uint32_t& _width, uint32_t& _height, uint32_t& _debug, uint32_t& _reset, MouseState* _mouse)
 	{
@@ -767,15 +896,41 @@ restart:
 						handle  = size->m_handle;
 						_width  = size->m_width;
 						_height = size->m_height;
+						BX_TRACE("Window resize event: %d: %dx%d", handle, _width, _height);
 
 						needReset = true;
 					}
 					break;
 
 				case Event::Window:
+					{
+						const WindowEvent* window = static_cast<const WindowEvent*>(ev);
+						if (0 == window->m_handle.idx)
+						{
+							WindowState& win = s_window[0];
+
+							if (NULL != window->m_nwh
+							&&  win.m_nwh != window->m_nwh)
+							{
+								handle    = window->m_handle;
+								needReset = true;
+							}
+
+							win.m_handle = window->m_handle;
+							win.m_nwh    = window->m_nwh;
+						}
+					}
 					break;
 
 				case Event::Suspend:
+					{
+						const SuspendEvent* suspend = static_cast<const SuspendEvent*>(ev);
+
+						if (Suspend::DidSuspend == suspend->m_state)
+						{
+							inputReleaseKeys();
+						}
+					}
 					break;
 
 				case Event::DropFile:
@@ -800,7 +955,8 @@ restart:
 		&&  needReset)
 		{
 			_reset = s_reset;
-			bgfx::reset(_width, _height, _reset);
+			BX_TRACE("bgfx::reset(%d, %d, 0x%x)", _width, _height, _reset);
+			resetMainWindow(_width, _height, _reset);
 			inputSetMouseResolution(uint16_t(_width), uint16_t(_height) );
 		}
 
@@ -850,7 +1006,7 @@ restart:
 			if (NULL != ev)
 			{
 				handle = ev->m_handle;
-				WindowState& win = s_window[handle.idx];
+				WindowState& win = s_window[isValid(handle) ? handle.idx : 0];
 
 				switch (ev->m_type)
 				{
@@ -939,6 +1095,14 @@ restart:
 					break;
 
 				case Event::Suspend:
+					{
+						const SuspendEvent* suspend = static_cast<const SuspendEvent*>(ev);
+
+						if (Suspend::DidSuspend == suspend->m_state)
+						{
+							inputReleaseKeys();
+						}
+					}
 					break;
 
 				case Event::DropFile:
@@ -979,7 +1143,8 @@ restart:
 		if (needReset)
 		{
 			_reset = s_reset;
-			bgfx::reset(s_window[0].m_width, s_window[0].m_height, _reset);
+			BX_TRACE("bgfx::reset(%d, %d, 0x%x)", s_window[0].m_width, s_window[0].m_height, _reset);
+			resetMainWindow(s_window[0].m_width, s_window[0].m_height, _reset);
 			inputSetMouseResolution(uint16_t(s_window[0].m_width), uint16_t(s_window[0].m_height) );
 		}
 
@@ -1010,14 +1175,14 @@ restart:
 
 	void* TinyStlAllocator::static_allocate(size_t _bytes)
 	{
-		return BX_ALLOC(getAllocator(), _bytes);
+		return bx::alloc(getAllocator(), _bytes);
 	}
 
 	void TinyStlAllocator::static_deallocate(void* _ptr, size_t /*_bytes*/)
 	{
 		if (NULL != _ptr)
 		{
-			BX_FREE(getAllocator(), _ptr);
+			bx::free(getAllocator(), _ptr);
 		}
 	}
 
@@ -1036,4 +1201,9 @@ extern "C" void* entry_get_default_native_window_handle()
 extern "C" void* entry_get_native_display_handle()
 {
 	return entry::getNativeDisplayHandle();
+}
+
+extern "C" bgfx::NativeWindowHandleType::Enum entry_get_native_window_handle_type()
+{
+	return entry::getNativeWindowHandleType();
 }

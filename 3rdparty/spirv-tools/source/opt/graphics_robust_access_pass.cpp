@@ -141,24 +141,17 @@
 
 #include "graphics_robust_access_pass.h"
 
-#include <algorithm>
-#include <cstring>
 #include <functional>
 #include <initializer_list>
-#include <limits>
 #include <utility>
 
-#include "constants.h"
-#include "def_use_manager.h"
 #include "function.h"
 #include "ir_context.h"
-#include "module.h"
 #include "pass.h"
 #include "source/diagnostic.h"
 #include "source/util/make_unique.h"
 #include "spirv-tools/libspirv.h"
 #include "spirv/unified1/GLSL.std.450.h"
-#include "spirv/unified1/spirv.h"
 #include "type_manager.h"
 #include "types.h"
 
@@ -194,14 +187,15 @@ spvtools::DiagnosticStream GraphicsRobustAccessPass::Fail() {
 
 spv_result_t GraphicsRobustAccessPass::IsCompatibleModule() {
   auto* feature_mgr = context()->get_feature_mgr();
-  if (!feature_mgr->HasCapability(SpvCapabilityShader))
+  if (!feature_mgr->HasCapability(spv::Capability::Shader))
     return Fail() << "Can only process Shader modules";
-  if (feature_mgr->HasCapability(SpvCapabilityVariablePointers))
+  if (feature_mgr->HasCapability(spv::Capability::VariablePointers))
     return Fail() << "Can't process modules with VariablePointers capability";
-  if (feature_mgr->HasCapability(SpvCapabilityVariablePointersStorageBuffer))
+  if (feature_mgr->HasCapability(
+          spv::Capability::VariablePointersStorageBuffer))
     return Fail() << "Can't process modules with VariablePointersStorageBuffer "
                      "capability";
-  if (feature_mgr->HasCapability(SpvCapabilityRuntimeDescriptorArrayEXT)) {
+  if (feature_mgr->HasCapability(spv::Capability::RuntimeDescriptorArrayEXT)) {
     // These have a RuntimeArray outside of Block-decorated struct.  There
     // is no way to compute the array length from within SPIR-V.
     return Fail() << "Can't process modules with RuntimeDescriptorArrayEXT "
@@ -210,8 +204,9 @@ spv_result_t GraphicsRobustAccessPass::IsCompatibleModule() {
 
   {
     auto* inst = context()->module()->GetMemoryModel();
-    const auto addressing_model = inst->GetSingleWordOperand(0);
-    if (addressing_model != SpvAddressingModelLogical)
+    const auto addressing_model =
+        spv::AddressingModel(inst->GetSingleWordOperand(0));
+    if (addressing_model != spv::AddressingModel::Logical)
       return Fail() << "Addressing model must be Logical.  Found "
                     << inst->PrettyPrint();
   }
@@ -237,11 +232,11 @@ bool GraphicsRobustAccessPass::ProcessAFunction(opt::Function* function) {
   for (auto& block : *function) {
     for (auto& inst : block) {
       switch (inst.opcode()) {
-        case SpvOpAccessChain:
-        case SpvOpInBoundsAccessChain:
+        case spv::Op::OpAccessChain:
+        case spv::Op::OpInBoundsAccessChain:
           access_chains.push_back(&inst);
           break;
-        case SpvOpImageTexelPointer:
+        case spv::Op::OpImageTexelPointer:
           image_texel_pointers.push_back(&inst);
           break;
         default:
@@ -268,7 +263,7 @@ void GraphicsRobustAccessPass::ClampIndicesForAccessChain(
   auto* def_use_mgr = context()->get_def_use_mgr();
   auto* type_mgr = context()->get_type_mgr();
   const bool have_int64_cap =
-      context()->get_feature_mgr()->HasCapability(SpvCapabilityInt64);
+      context()->get_feature_mgr()->HasCapability(spv::Capability::Int64);
 
   // Replaces one of the OpAccessChain index operands with a new value.
   // Updates def-use analysis.
@@ -288,9 +283,14 @@ void GraphicsRobustAccessPass::ClampIndicesForAccessChain(
   // use 0 for %min_value).
   auto clamp_index = [&inst, type_mgr, this, &replace_index](
                          uint32_t operand_index, Instruction* old_value,
-                         Instruction* min_value, Instruction* max_value) {
+                         Instruction* min_value,
+                         Instruction* max_value) -> spv_result_t {
     auto* clamp_inst =
         MakeSClampInst(*type_mgr, old_value, min_value, max_value, &inst);
+    if (clamp_inst == nullptr) {
+      Fail();
+      return SPV_ERROR_INTERNAL;
+    }
     return replace_index(operand_index, clamp_inst);
   };
 
@@ -309,7 +309,11 @@ void GraphicsRobustAccessPass::ClampIndicesForAccessChain(
 
     if (count <= 1) {
       // Replace the index with 0.
-      return replace_index(operand_index, GetValueForType(0, index_type));
+      Instruction* new_value = GetValueForType(0, index_type);
+      if (new_value == nullptr) {
+        return Fail();
+      }
+      return replace_index(operand_index, new_value);
     }
 
     uint64_t maxval = count - 1;
@@ -323,8 +327,15 @@ void GraphicsRobustAccessPass::ClampIndicesForAccessChain(
     // Determine the type for |maxval|.
     uint32_t next_id = context()->module()->IdBound();
     analysis::Integer signed_type_for_query(maxval_width, true);
-    auto* maxval_type =
-        type_mgr->GetRegisteredType(&signed_type_for_query)->AsInteger();
+    auto* maxval_type_registered =
+        type_mgr->GetRegisteredType(&signed_type_for_query);
+    if (maxval_type_registered == nullptr) {
+      return Fail();
+    }
+    auto* maxval_type = maxval_type_registered->AsInteger();
+    if (maxval_type == nullptr) {
+      return Fail();
+    }
     if (next_id != context()->module()->IdBound()) {
       module_status_.modified = true;
     }
@@ -357,15 +368,22 @@ void GraphicsRobustAccessPass::ClampIndicesForAccessChain(
         value = int_index_constant->GetS64BitValue();
       }
       if (value < 0) {
-        return replace_index(operand_index, GetValueForType(0, index_type));
+        Instruction* new_value = GetValueForType(0, index_type);
+        if (new_value == nullptr) {
+          return Fail();
+        }
+        return replace_index(operand_index, new_value);
       } else if (uint64_t(value) <= maxval) {
         // Nothing to do.
         return SPV_SUCCESS;
       } else {
         // Replace with maxval.
         assert(count > 0);  // Already took care of this case above.
-        return replace_index(operand_index,
-                             GetValueForType(maxval, maxval_type));
+        Instruction* new_value = GetValueForType(maxval, maxval_type);
+        if (new_value == nullptr) {
+          return Fail();
+        }
+        return replace_index(operand_index, new_value);
       }
     } else {
       // Generate a clamp instruction.
@@ -394,6 +412,9 @@ void GraphicsRobustAccessPass::ClampIndicesForAccessChain(
         }
         index_inst = WidenInteger(index_type->IsSigned(), maxval_width,
                                   index_inst, &inst);
+        if (index_inst == nullptr) {
+          return Fail();
+        }
       }
 
       // Finally, clamp the index.
@@ -443,28 +464,51 @@ void GraphicsRobustAccessPass::ClampIndicesForAccessChain(
       if (index_type->width() < target_width) {
         // Access chain indices are treated as signed integers.
         index_inst = WidenInteger(true, target_width, index_inst, &inst);
+        if (index_inst == nullptr) {
+          return Fail();
+        }
       } else if (count_type->width() < target_width) {
         // Assume type sizes are treated as unsigned.
         count_inst = WidenInteger(false, target_width, count_inst, &inst);
+        if (count_inst == nullptr) {
+          return Fail();
+        }
       }
       // Compute count - 1.
       // It doesn't matter if 1 is signed or unsigned.
       auto* one = GetValueForType(1, wider_type);
-      auto* count_minus_1 = InsertInst(
-          &inst, SpvOpISub, type_mgr->GetId(wider_type), TakeNextId(),
-          {{SPV_OPERAND_TYPE_ID, {count_inst->result_id()}},
-           {SPV_OPERAND_TYPE_ID, {one->result_id()}}});
+      if (!one) {
+        return Fail();
+      }
+      auto* count_minus_1 =
+          InsertInst(&inst, spv::Op::OpISub, type_mgr->GetId(wider_type),
+                     context()->TakeNextId(),
+                     {{SPV_OPERAND_TYPE_ID, {count_inst->result_id()}},
+                      {SPV_OPERAND_TYPE_ID, {one->result_id()}}});
+      if (count_minus_1 == nullptr) {
+        return Fail();
+      }
       auto* zero = GetValueForType(0, wider_type);
+      if (!zero) {
+        return Fail();
+      }
       // Make sure we clamp to an upper bound that is at most the signed max
       // for the target type.
       const uint64_t max_signed_value =
           ((uint64_t(1) << (target_width - 1)) - 1);
+      Instruction* max_signed_inst =
+          GetValueForType(max_signed_value, wider_type);
+      if (!max_signed_inst) {
+        return Fail();
+      }
       // Use unsigned-min to ensure that the result is always non-negative.
       // That ensures we satisfy the invariant for SClamp, where the "min"
       // argument we give it (zero), is no larger than the third argument.
       auto* upper_bound =
-          MakeUMinInst(*type_mgr, count_minus_1,
-                       GetValueForType(max_signed_value, wider_type), &inst);
+          MakeUMinInst(*type_mgr, count_minus_1, max_signed_inst, &inst);
+      if (upper_bound == nullptr) {
+        return Fail();
+      }
       // Now clamp the index to this upper bound.
       return clamp_index(operand_index, index_inst, zero, upper_bound);
     }
@@ -486,27 +530,27 @@ void GraphicsRobustAccessPass::ClampIndicesForAccessChain(
     Instruction* index_inst = GetDef(index_id);
 
     switch (pointee_type->opcode()) {
-      case SpvOpTypeMatrix:  // Use column count
-      case SpvOpTypeVector:  // Use component count
+      case spv::Op::OpTypeMatrix:  // Use column count
+      case spv::Op::OpTypeVector:  // Use component count
       {
         const uint32_t count = pointee_type->GetSingleWordOperand(2);
-        clamp_to_literal_count(idx, count);
+        if (clamp_to_literal_count(idx, count) != SPV_SUCCESS) return;
         pointee_type = GetDef(pointee_type->GetSingleWordOperand(1));
       } break;
 
-      case SpvOpTypeArray: {
+      case spv::Op::OpTypeArray: {
         // The array length can be a spec constant, so go through the general
         // case.
         Instruction* array_len = GetDef(pointee_type->GetSingleWordOperand(2));
-        clamp_to_count(idx, array_len);
+        if (clamp_to_count(idx, array_len) != SPV_SUCCESS) return;
         pointee_type = GetDef(pointee_type->GetSingleWordOperand(1));
       } break;
 
-      case SpvOpTypeStruct: {
+      case spv::Op::OpTypeStruct: {
         // SPIR-V requires the index to be an OpConstant.
         // We need to know the index literal value so we can compute the next
         // pointee type.
-        if (index_inst->opcode() != SpvOpConstant ||
+        if (index_inst->opcode() != spv::Op::OpConstant ||
             !constant_mgr->GetConstantFromInst(index_inst)
                  ->type()
                  ->AsInteger()) {
@@ -537,12 +581,12 @@ void GraphicsRobustAccessPass::ClampIndicesForAccessChain(
         // No need to clamp this index.  We just checked that it's valid.
       } break;
 
-      case SpvOpTypeRuntimeArray: {
+      case spv::Op::OpTypeRuntimeArray: {
         auto* array_len = MakeRuntimeArrayLengthInst(&inst, idx);
         if (!array_len) {  // We've already signaled an error.
           return;
         }
-        clamp_to_count(idx, array_len);
+        if (clamp_to_count(idx, array_len) != SPV_SUCCESS) return;
         if (module_status_.failed) return;
         pointee_type = GetDef(pointee_type->GetSingleWordOperand(1));
       } break;
@@ -568,19 +612,22 @@ uint32_t GraphicsRobustAccessPass::GetGlslInsts() {
     }
     if (module_status_.glsl_insts_id == 0) {
       // Make a new import instruction.
-      module_status_.glsl_insts_id = TakeNextId();
+      module_status_.glsl_insts_id = context()->TakeNextId();
+      if (module_status_.glsl_insts_id == 0) {
+        return 0;
+      }
       std::vector<uint32_t> words = spvtools::utils::MakeVector(glsl);
       auto import_inst = MakeUnique<Instruction>(
-          context(), SpvOpExtInstImport, 0, module_status_.glsl_insts_id,
+          context(), spv::Op::OpExtInstImport, 0, module_status_.glsl_insts_id,
           std::initializer_list<Operand>{
               Operand{SPV_OPERAND_TYPE_LITERAL_STRING, std::move(words)}});
       Instruction* inst = import_inst.get();
       context()->module()->AddExtInstImport(std::move(import_inst));
       module_status_.modified = true;
       context()->AnalyzeDefUse(inst);
-      // Reanalyze the feature list, since we added an extended instruction
-      // set improt.
-      context()->get_feature_mgr()->Analyze(context()->module());
+      // Invalidates the feature manager, since we added an extended instruction
+      // set import.
+      context()->ResetFeatureManager();
     }
   }
   return module_status_.glsl_insts_id;
@@ -607,10 +654,13 @@ opt::Instruction* opt::GraphicsRobustAccessPass::WidenInteger(
   auto* type_mgr = context()->get_type_mgr();
   auto* unsigned_type = type_mgr->GetRegisteredType(&unsigned_type_for_query);
   auto type_id = context()->get_type_mgr()->GetId(unsigned_type);
-  auto conversion_id = TakeNextId();
+  auto conversion_id = context()->TakeNextId();
+  if (conversion_id == 0) {
+    return nullptr;
+  }
   auto* conversion = InsertInst(
-      before_inst, (sign_extend ? SpvOpSConvert : SpvOpUConvert), type_id,
-      conversion_id, {{SPV_OPERAND_TYPE_ID, {value->result_id()}}});
+      before_inst, (sign_extend ? spv::Op::OpSConvert : spv::Op::OpUConvert),
+      type_id, conversion_id, {{SPV_OPERAND_TYPE_ID, {value->result_id()}}});
   return conversion;
 }
 
@@ -621,14 +671,20 @@ Instruction* GraphicsRobustAccessPass::MakeUMinInst(
   // the function so we force a deterministic ordering in case both of them need
   // to take a new ID.
   const uint32_t glsl_insts_id = GetGlslInsts();
-  uint32_t smin_id = TakeNextId();
+  if (glsl_insts_id == 0) {
+    return nullptr;
+  }
+  uint32_t smin_id = context()->TakeNextId();
+  if (smin_id == 0) {
+    return nullptr;
+  }
   const auto xwidth = tm.GetType(x->type_id())->AsInteger()->width();
   const auto ywidth = tm.GetType(y->type_id())->AsInteger()->width();
   assert(xwidth == ywidth);
   (void)xwidth;
   (void)ywidth;
   auto* smin_inst = InsertInst(
-      where, SpvOpExtInst, x->type_id(), smin_id,
+      where, spv::Op::OpExtInst, x->type_id(), smin_id,
       {
           {SPV_OPERAND_TYPE_ID, {glsl_insts_id}},
           {SPV_OPERAND_TYPE_EXTENSION_INSTRUCTION_NUMBER, {GLSLstd450UMin}},
@@ -645,7 +701,13 @@ Instruction* GraphicsRobustAccessPass::MakeSClampInst(
   // the function so we force a deterministic ordering in case both of them need
   // to take a new ID.
   const uint32_t glsl_insts_id = GetGlslInsts();
-  uint32_t clamp_id = TakeNextId();
+  if (glsl_insts_id == 0) {
+    return nullptr;
+  }
+  uint32_t clamp_id = context()->TakeNextId();
+  if (clamp_id == 0) {
+    return nullptr;
+  }
   const auto xwidth = tm.GetType(x->type_id())->AsInteger()->width();
   const auto minwidth = tm.GetType(min->type_id())->AsInteger()->width();
   const auto maxwidth = tm.GetType(max->type_id())->AsInteger()->width();
@@ -655,7 +717,7 @@ Instruction* GraphicsRobustAccessPass::MakeSClampInst(
   (void)minwidth;
   (void)maxwidth;
   auto* clamp_inst = InsertInst(
-      where, SpvOpExtInst, x->type_id(), clamp_id,
+      where, spv::Op::OpExtInst, x->type_id(), clamp_id,
       {
           {SPV_OPERAND_TYPE_ID, {glsl_insts_id}},
           {SPV_OPERAND_TYPE_EXTENSION_INSTRUCTION_NUMBER, {GLSLstd450SClamp}},
@@ -689,13 +751,13 @@ Instruction* GraphicsRobustAccessPass::MakeRuntimeArrayLengthInst(
   Instruction* pointer_to_containing_struct = nullptr;
   while (steps_remaining > 0) {
     switch (current_access_chain->opcode()) {
-      case SpvOpCopyObject:
+      case spv::Op::OpCopyObject:
         // Whoops. Walk right through this one.
         current_access_chain =
             GetDef(current_access_chain->GetSingleWordInOperand(0));
         break;
-      case SpvOpAccessChain:
-      case SpvOpInBoundsAccessChain: {
+      case spv::Op::OpAccessChain:
+      case spv::Op::OpInBoundsAccessChain: {
         const int first_index_operand = 3;
         // How many indices in this access chain contribute to getting us
         // to an element in the runtime array?
@@ -760,7 +822,11 @@ Instruction* GraphicsRobustAccessPass::MakeRuntimeArrayLengthInst(
               base_ptr_type->storage_class());
 
           // Create the instruction and insert it.
-          const auto new_access_chain_id = TakeNextId();
+          const auto new_access_chain_id = context()->TakeNextId();
+          if (new_access_chain_id == 0) {
+            Fail();
+            return nullptr;
+          }
           auto* new_access_chain =
               InsertInst(current_access_chain, current_access_chain->opcode(),
                          new_access_chain_type_id, new_access_chain_id, ops);
@@ -789,11 +855,16 @@ Instruction* GraphicsRobustAccessPass::MakeRuntimeArrayLengthInst(
       uint32_t(struct_type->element_types().size() - 1);
   // Create the length-of-array instruction before the original access chain,
   // but after the generation of the pointer to the struct.
-  const auto array_len_id = TakeNextId();
+  const auto array_len_id = context()->TakeNextId();
+  if (array_len_id == 0) {
+    Fail();
+    return nullptr;
+  }
   analysis::Integer uint_type_for_query(32, false);
   auto* uint_type = type_mgr->GetRegisteredType(&uint_type_for_query);
   auto* array_len = InsertInst(
-      access_chain, SpvOpArrayLength, type_mgr->GetId(uint_type), array_len_id,
+      access_chain, spv::Op::OpArrayLength, type_mgr->GetId(uint_type),
+      array_len_id,
       {{SPV_OPERAND_TYPE_ID, {pointer_to_containing_struct->result_id()}},
        {SPV_OPERAND_TYPE_LITERAL_INTEGER, {member_index_of_runtime_array}}});
   return array_len;
@@ -839,11 +910,11 @@ spv_result_t GraphicsRobustAccessPass::ClampCoordinateForImageTexelPointer(
 
   // Declare the ImageQuery capability if the module doesn't already have it.
   auto* feature_mgr = context()->get_feature_mgr();
-  if (!feature_mgr->HasCapability(SpvCapabilityImageQuery)) {
+  if (!feature_mgr->HasCapability(spv::Capability::ImageQuery)) {
     auto cap = MakeUnique<Instruction>(
-        context(), SpvOpCapability, 0, 0,
+        context(), spv::Op::OpCapability, 0, 0,
         std::initializer_list<Operand>{
-            {SPV_OPERAND_TYPE_CAPABILITY, {SpvCapabilityImageQuery}}});
+            {SPV_OPERAND_TYPE_CAPABILITY, {spv::Capability::ImageQuery}}});
     def_use_mgr->AnalyzeInstDefUse(cap.get());
     context()->AddCapability(std::move(cap));
     feature_mgr->Analyze(context()->module());
@@ -890,21 +961,21 @@ spv_result_t GraphicsRobustAccessPass::ClampCoordinateForImageTexelPointer(
     const int arrayness_bonus = arrayed ? 1 : 0;
     int num_coords = 0;
     switch (dim) {
-      case SpvDimBuffer:
+      case spv::Dim::Buffer:
       case SpvDim1D:
         num_coords = 1;
         break;
-      case SpvDimCube:
+      case spv::Dim::Cube:
         // For cube, we need bounds for x, y, but not face.
-      case SpvDimRect:
+      case spv::Dim::Rect:
       case SpvDim2D:
         num_coords = 2;
         break;
       case SpvDim3D:
         num_coords = 3;
         break;
-      case SpvDimSubpassData:
-      case SpvDimMax:
+      case spv::Dim::SubpassData:
+      case spv::Dim::Max:
         return Fail() << "Invalid image dimension for OpImageTexelPointer: "
                       << int(dim);
         break;
@@ -939,14 +1010,20 @@ spv_result_t GraphicsRobustAccessPass::ClampCoordinateForImageTexelPointer(
     return type_mgr->GetRegisteredType(&proposed);
   }();
 
-  const uint32_t image_id = TakeNextId();
+  const uint32_t image_id = context()->TakeNextId();
+  if (image_id == 0) {
+    return Fail();
+  }
   auto* image =
-      InsertInst(image_texel_pointer, SpvOpLoad, image_type_id, image_id,
+      InsertInst(image_texel_pointer, spv::Op::OpLoad, image_type_id, image_id,
                  {{SPV_OPERAND_TYPE_ID, {image_ptr->result_id()}}});
 
-  const uint32_t query_size_id = TakeNextId();
+  const uint32_t query_size_id = context()->TakeNextId();
+  if (query_size_id == 0) {
+    return Fail();
+  }
   auto* query_size =
-      InsertInst(image_texel_pointer, SpvOpImageQuerySize,
+      InsertInst(image_texel_pointer, spv::Op::OpImageQuerySize,
                  type_mgr->GetTypeInstruction(query_size_type), query_size_id,
                  {{SPV_OPERAND_TYPE_ID, {image->result_id()}}});
 
@@ -962,7 +1039,7 @@ spv_result_t GraphicsRobustAccessPass::ClampCoordinateForImageTexelPointer(
   // in the face index ranging from 0 through 5. The inclusive upper bound
   // on the third coordinate therefore is multiplied by 6.
   auto* query_size_including_faces = query_size;
-  if (arrayed && (dim == SpvDimCube)) {
+  if (arrayed && (dim == spv::Dim::Cube)) {
     // Multiply the last coordinate by 6.
     auto* component_6 = constant_mgr->GetConstant(coord_component_type, {6});
     const uint32_t component_6_id =
@@ -972,9 +1049,12 @@ spv_result_t GraphicsRobustAccessPass::ClampCoordinateForImageTexelPointer(
         query_size_type, {component_1_id, component_1_id, component_6_id});
     auto* multiplicand_inst =
         constant_mgr->GetDefiningInstruction(multiplicand);
-    const auto query_size_including_faces_id = TakeNextId();
+    const auto query_size_including_faces_id = context()->TakeNextId();
+    if (query_size_including_faces_id == 0) {
+      return Fail();
+    }
     query_size_including_faces = InsertInst(
-        image_texel_pointer, SpvOpIMul,
+        image_texel_pointer, spv::Op::OpIMul,
         type_mgr->GetTypeInstruction(query_size_type),
         query_size_including_faces_id,
         {{SPV_OPERAND_TYPE_ID, {query_size_including_faces->result_id()}},
@@ -996,9 +1076,12 @@ spv_result_t GraphicsRobustAccessPass::ClampCoordinateForImageTexelPointer(
                 query_size_type,
                 std::vector<uint32_t>(query_num_components, component_0_id));
 
-  const uint32_t query_max_including_faces_id = TakeNextId();
+  const uint32_t query_max_including_faces_id = context()->TakeNextId();
+  if (query_max_including_faces_id == 0) {
+    return Fail();
+  }
   auto* query_max_including_faces = InsertInst(
-      image_texel_pointer, SpvOpISub,
+      image_texel_pointer, spv::Op::OpISub,
       type_mgr->GetTypeInstruction(query_size_type),
       query_max_including_faces_id,
       {{SPV_OPERAND_TYPE_ID, {query_size_including_faces->result_id()}},
@@ -1009,19 +1092,28 @@ spv_result_t GraphicsRobustAccessPass::ClampCoordinateForImageTexelPointer(
   auto* clamp_coord = MakeSClampInst(
       *type_mgr, coord, constant_mgr->GetDefiningInstruction(coordinate_0),
       query_max_including_faces, image_texel_pointer);
+  if (clamp_coord == nullptr) {
+    return Fail();
+  }
   image_texel_pointer->SetInOperand(1, {clamp_coord->result_id()});
 
   // Clamp the sample index
   if (multisampled) {
     // Get the sample count via OpImageQuerySamples
-    const auto query_samples_id = TakeNextId();
+    const auto query_samples_id = context()->TakeNextId();
+    if (query_samples_id == 0) {
+      return Fail();
+    }
     auto* query_samples = InsertInst(
-        image_texel_pointer, SpvOpImageQuerySamples,
+        image_texel_pointer, spv::Op::OpImageQuerySamples,
         constant_mgr->GetDefiningInstruction(component_0)->type_id(),
         query_samples_id, {{SPV_OPERAND_TYPE_ID, {image->result_id()}}});
 
-    const auto max_samples_id = TakeNextId();
-    auto* max_samples = InsertInst(image_texel_pointer, SpvOpImageQuerySamples,
+    const auto max_samples_id = context()->TakeNextId();
+    if (max_samples_id == 0) {
+      return Fail();
+    }
+    auto* max_samples = InsertInst(image_texel_pointer, spv::Op::OpImageQuerySamples,
                                    query_samples->type_id(), max_samples_id,
                                    {{SPV_OPERAND_TYPE_ID, {query_samples_id}},
                                     {SPV_OPERAND_TYPE_ID, {component_1_id}}});
@@ -1029,6 +1121,9 @@ spv_result_t GraphicsRobustAccessPass::ClampCoordinateForImageTexelPointer(
     auto* clamp_samples = MakeSClampInst(
         *type_mgr, samples, constant_mgr->GetDefiningInstruction(coordinate_0),
         max_samples, image_texel_pointer);
+    if (clamp_samples == nullptr) {
+      return Fail();
+    }
     image_texel_pointer->SetInOperand(2, {clamp_samples->result_id()});
 
   } else {
@@ -1043,8 +1138,11 @@ spv_result_t GraphicsRobustAccessPass::ClampCoordinateForImageTexelPointer(
 }
 
 opt::Instruction* GraphicsRobustAccessPass::InsertInst(
-    opt::Instruction* where_inst, SpvOp opcode, uint32_t type_id,
+    opt::Instruction* where_inst, spv::Op opcode, uint32_t type_id,
     uint32_t result_id, const Instruction::OperandList& operands) {
+  if (result_id == 0) {
+    return nullptr;
+  }
   module_status_.modified = true;
   auto* result = where_inst->InsertBefore(
       MakeUnique<Instruction>(context(), opcode, type_id, result_id, operands));

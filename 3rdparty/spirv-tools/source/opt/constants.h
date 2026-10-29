@@ -50,6 +50,7 @@ class StructConstant;
 class VectorConstant;
 class MatrixConstant;
 class ArrayConstant;
+class TensorConstant;
 class NullConstant;
 class ConstantManager;
 
@@ -73,6 +74,7 @@ class Constant {
   virtual VectorConstant* AsVectorConstant() { return nullptr; }
   virtual MatrixConstant* AsMatrixConstant() { return nullptr; }
   virtual ArrayConstant* AsArrayConstant() { return nullptr; }
+  virtual TensorConstant* AsTensorConstant() { return nullptr; }
   virtual NullConstant* AsNullConstant() { return nullptr; }
 
   virtual const ScalarConstant* AsScalarConstant() const { return nullptr; }
@@ -86,6 +88,7 @@ class Constant {
   virtual const VectorConstant* AsVectorConstant() const { return nullptr; }
   virtual const MatrixConstant* AsMatrixConstant() const { return nullptr; }
   virtual const ArrayConstant* AsArrayConstant() const { return nullptr; }
+  virtual const TensorConstant* AsTensorConstant() const { return nullptr; }
   virtual const NullConstant* AsNullConstant() const { return nullptr; }
 
   // Returns the float representation of the constant. Must be a 32 bit
@@ -163,6 +166,21 @@ class ScalarConstant : public Constant {
     return is_zero;
   }
 
+  uint32_t GetU32BitValue() const {
+    // Relies on unsigned values smaller than 32-bit being zero extended.  See
+    // section 2.2.1 of the SPIR-V spec.
+    assert(words().size() == 1);
+    return words()[0];
+  }
+
+  uint64_t GetU64BitValue() const {
+    // Relies on unsigned values smaller than 64-bit being zero extended.  See
+    // section 2.2.1 of the SPIR-V spec.
+    assert(words().size() == 2);
+    return static_cast<uint64_t>(words()[1]) << 32 |
+           static_cast<uint64_t>(words()[0]);
+  }
+
  protected:
   ScalarConstant(const Type* ty, const std::vector<uint32_t>& w)
       : Constant(ty), words_(w) {}
@@ -189,23 +207,8 @@ class IntConstant : public ScalarConstant {
     return words()[0];
   }
 
-  uint32_t GetU32BitValue() const {
-    // Relies on unsigned values smaller than 32-bit being zero extended.  See
-    // section 2.2.1 of the SPIR-V spec.
-    assert(words().size() == 1);
-    return words()[0];
-  }
-
   int64_t GetS64BitValue() const {
     // Relies on unsigned values smaller than 64-bit being sign extended.  See
-    // section 2.2.1 of the SPIR-V spec.
-    assert(words().size() == 2);
-    return static_cast<uint64_t>(words()[1]) << 32 |
-           static_cast<uint64_t>(words()[0]);
-  }
-
-  uint64_t GetU64BitValue() const {
-    // Relies on unsigned values smaller than 64-bit being zero extended.  See
     // section 2.2.1 of the SPIR-V spec.
     assert(words().size() == 2);
     return static_cast<uint64_t>(words()[1]) << 32 |
@@ -426,6 +429,28 @@ class ArrayConstant : public CompositeConstant {
   }
 };
 
+// Tensor type constant.
+class TensorConstant : public CompositeConstant {
+ public:
+  TensorConstant(const TensorARM* ty) : CompositeConstant(ty) {}
+  TensorConstant(const TensorARM* ty,
+                 const std::vector<const Constant*>& components)
+      : CompositeConstant(ty, components) {}
+  TensorConstant(const TensorARM* ty, std::vector<const Constant*>&& components)
+      : CompositeConstant(ty, std::move(components)) {}
+
+  TensorConstant* AsTensorConstant() override { return this; }
+  const TensorConstant* AsTensorConstant() const override { return this; }
+
+  // Make a copy of this TensorConstant instance.
+  std::unique_ptr<TensorConstant> CopyTensorConstant() const {
+    return MakeUnique<TensorConstant>(type_->AsTensorARM(), components_);
+  }
+  std::unique_ptr<Constant> Copy() const override {
+    return std::unique_ptr<Constant>(CopyTensorConstant().release());
+  }
+};
+
 // Null type constant.
 class NullConstant : public Constant {
  public:
@@ -519,6 +544,14 @@ class ConstantManager {
     return GetConstant(type, std::vector<uint32_t>(literal_words_or_ids.begin(),
                                                    literal_words_or_ids.end()));
   }
+
+  // Takes a type and creates a OpConstantComposite
+  // This allows a
+  // OpConstantNull %composite_type
+  // to become a
+  // OpConstantComposite %composite_type %null %null ... etc
+  // Assumes type is a Composite already, otherwise returns null
+  const Constant* GetNullCompositeConstant(const Type* type);
 
   // Gets or creates a unique Constant instance of Vector type |type| with
   // numeric elements and a vector of constant defining words |literal_words|.
@@ -649,10 +682,24 @@ class ConstantManager {
   const Constant* GetDoubleConst(double val);
 
   // Returns the id of a 32-bit signed integer constant with value |val|.
-  uint32_t GetSIntConst(int32_t val);
+  uint32_t GetSIntConstId(int32_t val);
+
+  // Returns an integer constant with `bitWidth` and value |val|. If `isSigned`
+  // is true, the constant will be a signed integer. Otherwise it will be
+  // unsigned. Only the `bitWidth` lower order bits of |val| will be used. The
+  // rest will be ignored.
+  const Constant* GetIntConst(uint64_t val, int32_t bitWidth, bool isSigned);
 
   // Returns the id of a 32-bit unsigned integer constant with value |val|.
-  uint32_t GetUIntConst(uint32_t val);
+  uint32_t GetUIntConstId(uint32_t val);
+
+  // Returns the id of a OpConstantNull with type of |type|.
+  uint32_t GetNullConstId(const Type* type);
+
+  // Returns a constant whose value is `value` and type is `type`. This constant
+  // will be generated by `const_mgr`. The type must be a scalar integer type.
+  const Constant* GenerateIntegerConstant(const analysis::Integer* integer_type,
+                                          uint64_t result);
 
  private:
   // Creates a Constant instance with the given type and a vector of constant

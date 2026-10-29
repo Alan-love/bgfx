@@ -232,7 +232,7 @@ class SSARewriter {
   // during rewriting.
   //
   // Once the candidate Phi is created, it returns its ID.
-  PhiCandidate& CreatePhiCandidate(uint32_t var_id, BasicBlock* bb);
+  PhiCandidate* CreatePhiCandidate(uint32_t var_id, BasicBlock* bb);
 
   // Attempts to remove a trivial Phi candidate |phi_cand|. Trivial Phis are
   // those that only reference themselves and one other value |val| any number
@@ -252,11 +252,6 @@ class SSARewriter {
   // trivial Phis.  This will add missing arguments and remove trivial Phi
   // candidates.
   void FinalizePhiCandidates();
-
-  // Adds DebugValues for DebugDeclares in
-  // |decls_invisible_to_value_assignment_|. Returns whether the function was
-  // modified or not, and whether or not the conversion was successful.
-  Pass::Status AddDebugValuesForInvisibleDebugDecls(Function* fp);
 
   // Prints the table of Phi candidates to std::cerr.
   void PrintPhiCandidates() const;
@@ -295,10 +290,6 @@ class SSARewriter {
 
   // Memory pass requesting the SSA rewriter.
   MemPass* pass_;
-
-  // Set of DebugDeclare instructions that are not added as DebugValue because
-  // they are invisible to the store or phi instructions.
-  std::unordered_set<Instruction*> decls_invisible_to_value_assignment_;
 };
 
 class SSARewritePass : public MemPass {

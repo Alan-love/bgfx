@@ -80,7 +80,7 @@ class MemPass : public Pass {
   bool IsTargetType(const Instruction* typeInst) const;
 
   // Returns true if |opcode| is a non-ptr access chain op
-  bool IsNonPtrAccessChain(const SpvOp opcode) const;
+  bool IsNonPtrAccessChain(const spv::Op opcode) const;
 
   // Given the id |ptrId|, return true if the top-most non-CopyObj is
   // a variable, a non-ptr access chain or a parameter of pointer type.
@@ -114,11 +114,11 @@ class MemPass : public Pass {
   void DCEInst(Instruction* inst, const std::function<void(Instruction*)>&);
 
   // Call all the cleanup helper functions on |func|.
-  bool CFGCleanup(Function* func);
+  Status CFGCleanup(Function* func);
 
   // Return true if |op| is supported decorate.
-  inline bool IsNonTypeDecorate(uint32_t op) const {
-    return (op == SpvOpDecorate || op == SpvOpDecorateId);
+  inline bool IsNonTypeDecorate(spv::Op op) const {
+    return (op == spv::Op::OpDecorate || op == spv::Op::OpDecorateId);
   }
 
   // Return the id of an undef value with type |type_id|.  Create and insert an
@@ -142,15 +142,15 @@ class MemPass : public Pass {
   bool HasOnlySupportedRefs(uint32_t varId);
 
   // Remove all the unreachable basic blocks in |func|.
-  bool RemoveUnreachableBlocks(Function* func);
+  Status RemoveUnreachableBlocks(Function* func);
 
   // Remove the block pointed by the iterator |*bi|. This also removes
   // all the instructions in the pointed-to block.
   void RemoveBlock(Function::iterator* bi);
 
   // Remove Phi operands in |phi| that are coming from blocks not in
-  // |reachable_blocks|.
-  void RemovePhiOperands(
+  // |reachable_blocks|. Returns false if it fails.
+  bool RemovePhiOperands(
       Instruction* phi,
       const std::unordered_set<BasicBlock*>& reachable_blocks);
 

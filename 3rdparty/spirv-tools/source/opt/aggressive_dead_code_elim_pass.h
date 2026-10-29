@@ -44,8 +44,10 @@ class AggressiveDCEPass : public MemPass {
   using GetBlocksFunction =
       std::function<std::vector<BasicBlock*>*(const BasicBlock*)>;
 
-  AggressiveDCEPass(bool preserve_interface = false)
-      : preserve_interface_(preserve_interface) {}
+  AggressiveDCEPass(bool preserve_interface = false,
+                    bool remove_outputs = false)
+      : preserve_interface_(preserve_interface),
+        remove_outputs_(remove_outputs) {}
 
   const char* name() const override { return "eliminate-dead-code-aggressive"; }
   Status Process() override;
@@ -63,9 +65,14 @@ class AggressiveDCEPass : public MemPass {
   // is not allowed.
   bool preserve_interface_;
 
+  // Output variables can be removed from the interface if this is true.
+  // This is safe if the caller knows that the corresponding input variable
+  // in the following shader has been removed. It is false by default.
+  bool remove_outputs_;
+
   // Return true if |varId| is a variable of |storageClass|. |varId| must either
   // be 0 or the result of an instruction.
-  bool IsVarOfStorage(uint32_t varId, uint32_t storageClass);
+  bool IsVarOfStorage(uint32_t varId, spv::StorageClass storageClass);
 
   // Return true if the instance of the variable |varId| can only be access in
   // |func|.  For example, a function scope variable, or a private variable
@@ -78,8 +85,10 @@ class AggressiveDCEPass : public MemPass {
   }
 
   // Adds entry points, execution modes and workgroup size decorations to the
-  // worklist for processing with the first function.
-  void InitializeModuleScopeLiveInstructions();
+  // worklist for processing with the first function. Returns
+  // Pass::Status::Failure if it could not create a required debug instruction.
+  // Returns Pass::Status::SuccessWithoutChange otherwise.
+  Pass::Status InitializeModuleScopeLiveInstructions();
 
   // Add |inst| to worklist_ and live_insts_.
   void AddToWorklist(Instruction* inst) {
@@ -129,7 +138,7 @@ class AggressiveDCEPass : public MemPass {
   // existing control structures will remain. This can leave not-insignificant
   // sequences of ultimately useless code.
   // TODO(): Remove useless control constructs.
-  bool AggressiveDCE(Function* func);
+  Pass::Status AggressiveDCE(Function* func);
 
   Pass::Status ProcessImpl();
 
@@ -143,9 +152,21 @@ class AggressiveDCEPass : public MemPass {
   // will be empty at the end.
   void ProcessWorkList(Function* func);
 
+  // Process each DebugDeclare and DebugValue in |func| that has not been
+  // marked as live in the work list. DebugDeclare's are marked live now, and
+  // DebugValue Value operands are set to OpUndef.  The work list will be empty
+  // at the end.
+  // Returns Pass::Status::Failure if it could not create an OpUndef.
+  // Otherwise, returns Pass::Status::SuccessWithChange if it made changes,
+  Pass::Status ProcessDebugInformation(
+      std::list<BasicBlock*>& structured_order);
+
   // Kills any instructions in |func| that have not been marked as live.
-  bool KillDeadInstructions(const Function* func,
-                            std::list<BasicBlock*>& structured_order);
+  // Returns Pass::Status::Failure if it could not create an OpUndef.
+  // Otherwise, returns Pass::Status::SuccessWithChange if it made changes,
+  // and Pass::Status::SuccessWithoutChange otherwise.
+  Pass::Status KillDeadInstructions(const Function* func,
+                                    std::list<BasicBlock*>& structured_order);
 
   // Adds the instructions that define the operands of |inst| to the work list.
   void AddOperandsToWorkList(const Instruction* inst);
@@ -177,6 +198,9 @@ class AggressiveDCEPass : public MemPass {
 
   // Adds all decorations of |inst| to the work list.
   void AddDecorationsToWorkList(const Instruction* inst);
+
+  // Adds DebugScope instruction associated with |inst| to the work list.
+  void AddDebugScopeToWorkList(const Instruction* inst);
 
   // Adds all debug instruction associated with |inst| to the work list.
   void AddDebugInstructionsToWorkList(const Instruction* inst);

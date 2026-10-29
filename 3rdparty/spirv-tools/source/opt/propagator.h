@@ -25,6 +25,7 @@
 
 #include "source/opt/ir_context.h"
 #include "source/opt/module.h"
+#include "source/opt/pass.h"
 
 namespace spvtools {
 namespace opt {
@@ -153,10 +154,10 @@ struct Edge {
 //   std::map<uint32_t, uint32_t> values;
 //   const auto visit_fn = [&ctx, &values](Instruction* instr,
 //                                         BasicBlock** dest_bb) {
-//     if (instr->opcode() == SpvOpStore) {
+//     if (instr->opcode() == spv::Op::OpStore) {
 //       uint32_t rhs_id = instr->GetSingleWordOperand(1);
 //       Instruction* rhs_def = ctx->get_def_use_mgr()->GetDef(rhs_id);
-//       if (rhs_def->opcode() == SpvOpConstant) {
+//       if (rhs_def->opcode() == spv::Op::OpConstant) {
 //         uint32_t val = rhs_def->GetSingleWordOperand(2);
 //         values[rhs_id] = val;
 //         return SSAPropagator::kInteresting;
@@ -182,7 +183,7 @@ class SSAPropagator {
  public:
   // Lattice values used for propagation. See class documentation for
   // a description.
-  enum PropStatus { kNotInteresting, kInteresting, kVarying };
+  enum PropStatus { kNotInteresting, kInteresting, kVarying, kFailed };
 
   using VisitFunction = std::function<PropStatus(Instruction*, BasicBlock**)>;
 
@@ -190,7 +191,9 @@ class SSAPropagator {
       : ctx_(context), visit_fn_(visit_fn) {}
 
   // Runs the propagator on function |fn|. Returns true if changes were made to
-  // the function. Otherwise, it returns false.
+  // the function. Otherwise, it returns false. The user should check
+  // IRContext::id_overflow() to see if there was an error caused by reaching
+  // the max id.
   bool Run(Function* fn);
 
   // Returns true if the |i|th argument for |phi| comes through a CFG edge that
@@ -218,13 +221,13 @@ class SSAPropagator {
 
   // Simulate the execution |block| by calling |visit_fn_| on every instruction
   // in it.
-  bool Simulate(BasicBlock* block);
+  Pass::Status Simulate(BasicBlock* block);
 
   // Simulate the execution of |instr| by replacing all the known values in
   // every operand and determining whether the result is interesting for
   // propagation. This invokes the callback function |visit_fn_| to determine
   // the value computed by |instr|.
-  bool Simulate(Instruction* instr);
+  Pass::Status Simulate(Instruction* instr);
 
   // Returns true if |instr| should be simulated again.
   bool ShouldSimulateAgain(Instruction* instr) const {

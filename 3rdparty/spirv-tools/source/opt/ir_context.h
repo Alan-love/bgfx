@@ -35,6 +35,7 @@
 #include "source/opt/dominator_analysis.h"
 #include "source/opt/feature_manager.h"
 #include "source/opt/fold.h"
+#include "source/opt/liveness.h"
 #include "source/opt/loop_descriptor.h"
 #include "source/opt/module.h"
 #include "source/opt/register_pressure.h"
@@ -42,6 +43,7 @@
 #include "source/opt/struct_cfg_analysis.h"
 #include "source/opt/type_manager.h"
 #include "source/opt/value_number_table.h"
+#include "source/table2.h"
 #include "source/util/make_unique.h"
 #include "source/util/string_utils.h"
 
@@ -81,7 +83,9 @@ class IRContext {
     kAnalysisConstants = 1 << 14,
     kAnalysisTypes = 1 << 15,
     kAnalysisDebugInfo = 1 << 16,
-    kAnalysisEnd = 1 << 17
+    kAnalysisLiveness = 1 << 17,
+    kAnalysisIdToGraphMapping = 1 << 18,
+    kAnalysisEnd = 1 << 19
   };
 
   using ProcessFunction = std::function<bool(Function*)>;
@@ -106,7 +110,8 @@ class IRContext {
         id_to_name_(nullptr),
         max_id_bound_(kDefaultMaxIdBound),
         preserve_bindings_(false),
-        preserve_spec_constants_(false) {
+        preserve_spec_constants_(false),
+        id_overflow_(false) {
     SetContextMessageConsumer(syntax_context_, consumer_);
     module_->SetContext(this);
   }
@@ -124,7 +129,8 @@ class IRContext {
         id_to_name_(nullptr),
         max_id_bound_(kDefaultMaxIdBound),
         preserve_bindings_(false),
-        preserve_spec_constants_(false) {
+        preserve_spec_constants_(false),
+        id_overflow_(false) {
     SetContextMessageConsumer(syntax_context_, consumer_);
     module_->SetContext(this);
     InitializeCombinators();
@@ -151,13 +157,19 @@ class IRContext {
   inline IteratorRange<Module::inst_iterator> capabilities();
   inline IteratorRange<Module::const_inst_iterator> capabilities() const;
 
+  // Iterators for extensions instructions contained in this module.
+  inline Module::inst_iterator extension_begin();
+  inline Module::inst_iterator extension_end();
+  inline IteratorRange<Module::inst_iterator> extensions();
+  inline IteratorRange<Module::const_inst_iterator> extensions() const;
+
   // Iterators for types, constants and global variables instructions.
   inline Module::inst_iterator types_values_begin();
   inline Module::inst_iterator types_values_end();
   inline IteratorRange<Module::inst_iterator> types_values();
   inline IteratorRange<Module::const_inst_iterator> types_values() const;
 
-  // Iterators for extension instructions contained in this module.
+  // Iterators for ext_inst import instructions contained in this module.
   inline Module::inst_iterator ext_inst_import_begin();
   inline Module::inst_iterator ext_inst_import_end();
   inline IteratorRange<Module::inst_iterator> ext_inst_imports();
@@ -193,26 +205,36 @@ class IRContext {
   inline IteratorRange<Module::const_inst_iterator> debugs3() const;
 
   // Iterators for debug info instructions (excluding OpLine & OpNoLine)
-  // contained in this module.  These are OpExtInst for DebugInfo extension
-  // placed between section 9 and 10.
+  // contained in this module.  These are OpExtInst &
+  // OpExtInstWithForwardRefsKHR for DebugInfo extension placed between section
+  // 9 and 10.
   inline Module::inst_iterator ext_inst_debuginfo_begin();
   inline Module::inst_iterator ext_inst_debuginfo_end();
   inline IteratorRange<Module::inst_iterator> ext_inst_debuginfo();
   inline IteratorRange<Module::const_inst_iterator> ext_inst_debuginfo() const;
 
   // Add |capability| to the module, if it is not already enabled.
-  inline void AddCapability(SpvCapability capability);
-
+  inline void AddCapability(spv::Capability capability);
   // Appends a capability instruction to this module.
   inline void AddCapability(std::unique_ptr<Instruction>&& c);
+  // Removes instruction declaring `capability` from this module.
+  // Returns true if the capability was removed, false otherwise.
+  bool RemoveCapability(spv::Capability capability);
+
   // Appends an extension instruction to this module.
   inline void AddExtension(const std::string& ext_name);
   inline void AddExtension(std::unique_ptr<Instruction>&& e);
+  // Removes instruction declaring `extension` from this module.
+  // Returns true if the extension was removed, false otherwise.
+  bool RemoveExtension(Extension extension);
+
   // Appends an extended instruction set instruction to this module.
   inline void AddExtInstImport(const std::string& name);
   inline void AddExtInstImport(std::unique_ptr<Instruction>&& e);
   // Set the memory model for this module.
   inline void SetMemoryModel(std::unique_ptr<Instruction>&& m);
+  // Get the memory model for this module.
+  inline const Instruction* GetMemoryModel() const;
   // Appends an entry point instruction to this module.
   inline void AddEntryPoint(std::unique_ptr<Instruction>&& e);
   // Appends an execution mode instruction to this module.
@@ -236,6 +258,8 @@ class IRContext {
   inline void AddType(std::unique_ptr<Instruction>&& t);
   // Appends a constant, global variable, or OpUndef instruction to this module.
   inline void AddGlobalValue(std::unique_ptr<Instruction>&& v);
+  // Prepends a function declaration to this module.
+  inline void AddFunctionDeclaration(std::unique_ptr<Function>&& f);
   // Appends a function to this module.
   inline void AddFunction(std::unique_ptr<Function>&& f);
 
@@ -246,6 +270,15 @@ class IRContext {
       BuildDefUseManager();
     }
     return def_use_mgr_.get();
+  }
+
+  // Returns a pointer to a liveness manager.  If the liveness manager is
+  // invalid, it is rebuilt first.
+  analysis::LivenessManager* get_liveness_mgr() {
+    if (!AreAnalysesValid(kAnalysisLiveness)) {
+      BuildLivenessManager();
+    }
+    return liveness_mgr_.get();
   }
 
   // Returns a pointer to a value number table.  If the liveness analysis is
@@ -367,6 +400,11 @@ class IRContext {
   // having more than one name. This method returns the first one it finds.
   inline Instruction* GetMemberName(uint32_t struct_type_id, uint32_t index);
 
+  // Copy names from |old_id| to |new_id|. Only copy member name if index is
+  // less than |max_member_index|.
+  inline void CloneNames(const uint32_t old_id, const uint32_t new_id,
+                         const uint32_t max_member_index = UINT32_MAX);
+
   // Sets the message consumer to the given |consumer|. |consumer| which will be
   // invoked every time there is a message to be communicated to the outside.
   void SetMessageConsumer(MessageConsumer c) { consumer_ = std::move(c); }
@@ -405,6 +443,15 @@ class IRContext {
   // Returns a pointer to the instruction after |inst| or |nullptr| if no such
   // instruction exists.
   Instruction* KillInst(Instruction* inst);
+
+  // Deletes all the instruction in the range [`begin`; `end`[, for which the
+  // unary predicate `condition` returned true.
+  // Returns true if at least one instruction was removed, false otherwise.
+  //
+  // Pointer and iterator pointing to the deleted instructions become invalid.
+  // However other pointers and iterators are still valid.
+  bool KillInstructionIf(Module::inst_iterator begin, Module::inst_iterator end,
+                         std::function<bool(Instruction*)> condition);
 
   // Collects the non-semantic instruction tree that uses |inst|'s result id
   // to be killed later.
@@ -461,6 +508,9 @@ class IRContext {
   // Change operands of debug instruction to DebugInfoNone.
   void KillOperandFromDebugInstructions(Instruction* inst);
 
+  // Remove the debug scope from any instruction related to |inst|.
+  void KillRelatedDebugScopes(Instruction* inst);
+
   // Returns the next unique id for use by an instruction.
   inline uint32_t TakeNextUniqueId() {
     assert(unique_id_ != std::numeric_limits<uint32_t>::max());
@@ -475,14 +525,14 @@ class IRContext {
     if (!AreAnalysesValid(kAnalysisCombinators)) {
       InitializeCombinators();
     }
-    const uint32_t kExtInstSetIdInIndx = 0;
-    const uint32_t kExtInstInstructionInIndx = 1;
+    constexpr uint32_t kExtInstSetIdInIndx = 0;
+    constexpr uint32_t kExtInstInstructionInIndx = 1;
 
-    if (inst->opcode() != SpvOpExtInst) {
-      return combinator_ops_[0].count(inst->opcode()) != 0;
+    if (inst->opcode() != spv::Op::OpExtInst) {
+      return combinator_ops_[0].count(uint32_t(inst->opcode())) != 0;
     } else {
       uint32_t set = inst->GetSingleWordInOperand(kExtInstSetIdInIndx);
-      uint32_t op = inst->GetSingleWordInOperand(kExtInstInstructionInIndx);
+      auto op = inst->GetSingleWordInOperand(kExtInstInstructionInIndx);
       return combinator_ops_[set].count(op) != 0;
     }
   }
@@ -519,6 +569,7 @@ class IRContext {
   inline uint32_t TakeNextId() {
     uint32_t next_id = module()->TakeNextIdBound();
     if (next_id == 0) {
+      id_overflow_ = true;
       if (consumer()) {
         std::string message = "ID overflow. Try running compact-ids.";
         consumer()(SPV_MSG_ERROR, "", {0, 0, 0}, message.c_str());
@@ -538,6 +589,13 @@ class IRContext {
     }
     return next_id;
   }
+
+  // Returns true if an ID overflow has occurred since the last time the flag
+  // was cleared.
+  bool id_overflow() const { return id_overflow_; }
+
+  // Clears the ID overflow flag.
+  void clear_id_overflow() { id_overflow_ = false; }
 
   FeatureManager* get_feature_mgr() {
     if (!feature_mgr_.get()) {
@@ -591,10 +649,27 @@ class IRContext {
   }
 
   Function* GetFunction(Instruction* inst) {
-    if (inst->opcode() != SpvOpFunction) {
+    if (inst->opcode() != spv::Op::OpFunction) {
       return nullptr;
     }
     return GetFunction(inst->result_id());
+  }
+
+  // Returns the graph whose id is |id|, if one exists.  Returns |nullptr|
+  // otherwise.
+  Graph* GetGraph(uint32_t id) {
+    if (!AreAnalysesValid(kAnalysisIdToGraphMapping)) {
+      BuildIdToGraphMapping();
+    }
+    auto entry = id_to_graph_.find(id);
+    return (entry != id_to_graph_.end()) ? entry->second : nullptr;
+  }
+
+  Graph* GetGraph(Instruction* inst) {
+    if (inst->opcode() != spv::Op::OpGraphARM) {
+      return nullptr;
+    }
+    return GetGraph(inst->result_id());
   }
 
   // Add to |todo| all ids of functions called directly from |func|.
@@ -625,11 +700,32 @@ class IRContext {
   // the function that contains |bb|.
   bool IsReachable(const opt::BasicBlock& bb);
 
+  // Return the stage of the module. Will generate error if entry points don't
+  // all have the same stage.
+  spv::ExecutionModel GetStage();
+
+  // Returns true of the current target environment is at least that of the
+  // given environment.
+  bool IsTargetEnvAtLeast(spv_target_env env) {
+    // A bit of a hack. We assume that the target environments are appended to
+    // the enum, so that there is an appropriate order.
+    return syntax_context_->target_env >= env;
+  }
+
+  // Return the target environment for the current context.
+  spv_target_env GetTargetEnv() const { return syntax_context_->target_env; }
+
  private:
   // Builds the def-use manager from scratch, even if it was already valid.
   void BuildDefUseManager() {
     def_use_mgr_ = MakeUnique<analysis::DefUseManager>(module());
     valid_analyses_ = valid_analyses_ | kAnalysisDefUse;
+  }
+
+  // Builds the liveness manager from scratch, even if it was already valid.
+  void BuildLivenessManager() {
+    liveness_mgr_ = MakeUnique<analysis::LivenessManager>(this);
+    valid_analyses_ = valid_analyses_ | kAnalysisLiveness;
   }
 
   // Builds the instruction-block map for the whole module.
@@ -652,6 +748,15 @@ class IRContext {
       id_to_func_[fn.result_id()] = &fn;
     }
     valid_analyses_ = valid_analyses_ | kAnalysisIdToFuncMapping;
+  }
+
+  // Builds the instruction-graph map for the whole module.
+  void BuildIdToGraphMapping() {
+    id_to_graph_.clear();
+    for (auto& g : module_->graphs()) {
+      id_to_graph_[g->DefInst().result_id()] = g.get();
+    }
+    valid_analyses_ = valid_analyses_ | kAnalysisIdToGraphMapping;
   }
 
   void BuildDecorationManager() {
@@ -735,7 +840,8 @@ class IRContext {
 
   // Analyzes the features in the owned module. Builds the manager if required.
   void AnalyzeFeatures() {
-    feature_mgr_ = MakeUnique<FeatureManager>(grammar_);
+    feature_mgr_ =
+        std::unique_ptr<FeatureManager>(new FeatureManager(grammar_));
     feature_mgr_->Analyze(module());
   }
 
@@ -806,6 +912,13 @@ class IRContext {
   // iterators to traverse instructions.
   std::unordered_map<uint32_t, Function*> id_to_func_;
 
+  // A map from ids to the graph they define. This mapping is
+  // built on-demand when GetGraph() is called.
+  //
+  // NOTE: Do not traverse this map. Ever. Use the graph iterators to
+  // traverse instructions.
+  std::unordered_map<uint32_t, Graph*> id_to_graph_;
+
   // A bitset indicating which analyzes are currently valid.
   Analysis valid_analyses_;
 
@@ -852,6 +965,9 @@ class IRContext {
 
   std::unique_ptr<StructuredCFGAnalysis> struct_cfg_analysis_;
 
+  // The liveness manager for |module_|.
+  std::unique_ptr<analysis::LivenessManager> liveness_mgr_;
+
   // The maximum legal value for the id bound.
   uint32_t max_id_bound_;
 
@@ -861,6 +977,9 @@ class IRContext {
   // Whether all specialization constants within |module_|
   // should be preserved.
   bool preserve_spec_constants_;
+
+  // Set to true if TakeNextId() fails.
+  bool id_overflow_;
 };
 
 inline IRContext::Analysis operator|(IRContext::Analysis lhs,
@@ -922,6 +1041,22 @@ IteratorRange<Module::inst_iterator> IRContext::capabilities() {
 
 IteratorRange<Module::const_inst_iterator> IRContext::capabilities() const {
   return ((const Module*)module())->capabilities();
+}
+
+Module::inst_iterator IRContext::extension_begin() {
+  return module()->extension_begin();
+}
+
+Module::inst_iterator IRContext::extension_end() {
+  return module()->extension_end();
+}
+
+IteratorRange<Module::inst_iterator> IRContext::extensions() {
+  return module()->extensions();
+}
+
+IteratorRange<Module::const_inst_iterator> IRContext::extensions() const {
+  return ((const Module*)module())->extensions();
 }
 
 Module::inst_iterator IRContext::types_values_begin() {
@@ -1014,10 +1149,10 @@ IteratorRange<Module::const_inst_iterator> IRContext::ext_inst_debuginfo()
   return ((const Module*)module_.get())->ext_inst_debuginfo();
 }
 
-void IRContext::AddCapability(SpvCapability capability) {
+void IRContext::AddCapability(spv::Capability capability) {
   if (!get_feature_mgr()->HasCapability(capability)) {
     std::unique_ptr<Instruction> capability_inst(new Instruction(
-        this, SpvOpCapability, 0, 0,
+        this, spv::Op::OpCapability, 0, 0,
         {{SPV_OPERAND_TYPE_CAPABILITY, {static_cast<uint32_t>(capability)}}}));
     AddCapability(std::move(capability_inst));
   }
@@ -1027,7 +1162,7 @@ void IRContext::AddCapability(std::unique_ptr<Instruction>&& c) {
   AddCombinatorsForCapability(c->GetSingleWordInOperand(0));
   if (feature_mgr_ != nullptr) {
     feature_mgr_->AddCapability(
-        static_cast<SpvCapability>(c->GetSingleWordInOperand(0)));
+        static_cast<spv::Capability>(c->GetSingleWordInOperand(0)));
   }
   if (AreAnalysesValid(kAnalysisDefUse)) {
     get_def_use_mgr()->AnalyzeInstDefUse(c.get());
@@ -1038,7 +1173,7 @@ void IRContext::AddCapability(std::unique_ptr<Instruction>&& c) {
 void IRContext::AddExtension(const std::string& ext_name) {
   std::vector<uint32_t> ext_words = spvtools::utils::MakeVector(ext_name);
   AddExtension(std::unique_ptr<Instruction>(
-      new Instruction(this, SpvOpExtension, 0u, 0u,
+      new Instruction(this, spv::Op::OpExtension, 0u, 0u,
                       {{SPV_OPERAND_TYPE_LITERAL_STRING, ext_words}})));
 }
 
@@ -1055,7 +1190,7 @@ void IRContext::AddExtension(std::unique_ptr<Instruction>&& e) {
 void IRContext::AddExtInstImport(const std::string& name) {
   std::vector<uint32_t> ext_words = spvtools::utils::MakeVector(name);
   AddExtInstImport(std::unique_ptr<Instruction>(
-      new Instruction(this, SpvOpExtInstImport, 0u, TakeNextId(),
+      new Instruction(this, spv::Op::OpExtInstImport, 0u, TakeNextId(),
                       {{SPV_OPERAND_TYPE_LITERAL_STRING, ext_words}})));
 }
 
@@ -1074,6 +1209,10 @@ void IRContext::SetMemoryModel(std::unique_ptr<Instruction>&& m) {
   module()->SetMemoryModel(std::move(m));
 }
 
+const Instruction* IRContext::GetMemoryModel() const {
+  return module()->GetMemoryModel();
+}
+
 void IRContext::AddEntryPoint(std::unique_ptr<Instruction>&& e) {
   module()->AddEntryPoint(std::move(e));
 }
@@ -1088,7 +1227,8 @@ void IRContext::AddDebug1Inst(std::unique_ptr<Instruction>&& d) {
 
 void IRContext::AddDebug2Inst(std::unique_ptr<Instruction>&& d) {
   if (AreAnalysesValid(kAnalysisNameMap)) {
-    if (d->opcode() == SpvOpName || d->opcode() == SpvOpMemberName) {
+    if (d->opcode() == spv::Op::OpName ||
+        d->opcode() == spv::Op::OpMemberName) {
       // OpName and OpMemberName do not have result-ids. The target of the
       // instruction is at InOperand index 0.
       id_to_name_->insert({d->GetSingleWordInOperand(0), d.get()});
@@ -1132,6 +1272,10 @@ void IRContext::AddGlobalValue(std::unique_ptr<Instruction>&& v) {
   module()->AddGlobalValue(std::move(v));
 }
 
+void IRContext::AddFunctionDeclaration(std::unique_ptr<Function>&& f) {
+  module()->AddFunctionDeclaration(std::move(f));
+}
+
 void IRContext::AddFunction(std::unique_ptr<Function>&& f) {
   module()->AddFunction(std::move(f));
 }
@@ -1151,8 +1295,8 @@ void IRContext::UpdateDefUse(Instruction* inst) {
 void IRContext::BuildIdToNameMap() {
   id_to_name_ = MakeUnique<std::multimap<uint32_t, Instruction*>>();
   for (Instruction& debug_inst : debugs2()) {
-    if (debug_inst.opcode() == SpvOpMemberName ||
-        debug_inst.opcode() == SpvOpName) {
+    if (debug_inst.opcode() == spv::Op::OpMemberName ||
+        debug_inst.opcode() == spv::Op::OpName) {
       id_to_name_->insert({debug_inst.GetSingleWordInOperand(0), &debug_inst});
     }
   }
@@ -1175,12 +1319,31 @@ Instruction* IRContext::GetMemberName(uint32_t struct_type_id, uint32_t index) {
   auto result = id_to_name_->equal_range(struct_type_id);
   for (auto i = result.first; i != result.second; ++i) {
     auto* name_instr = i->second;
-    if (name_instr->opcode() == SpvOpMemberName &&
+    if (name_instr->opcode() == spv::Op::OpMemberName &&
         name_instr->GetSingleWordInOperand(1) == index) {
       return name_instr;
     }
   }
   return nullptr;
+}
+
+void IRContext::CloneNames(const uint32_t old_id, const uint32_t new_id,
+                           const uint32_t max_member_index) {
+  std::vector<std::unique_ptr<Instruction>> names_to_add;
+  auto names = GetNames(old_id);
+  for (auto n : names) {
+    Instruction* old_name_inst = n.second;
+    if (old_name_inst->opcode() == spv::Op::OpMemberName) {
+      auto midx = old_name_inst->GetSingleWordInOperand(1);
+      if (midx >= max_member_index) continue;
+    }
+    std::unique_ptr<Instruction> new_name_inst(old_name_inst->Clone(this));
+    new_name_inst->SetInOperand(0, {new_id});
+    names_to_add.push_back(std::move(new_name_inst));
+  }
+  // We can't add the new names when we are iterating over name range above.
+  // We can add all the new names now.
+  for (auto& new_name : names_to_add) AddDebug2Inst(std::move(new_name));
 }
 
 }  // namespace opt

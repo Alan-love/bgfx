@@ -16,13 +16,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstring>
-#include <tuple>
+#include <initializer_list>
 #include <vector>
 
 #include "source/opt/def_use_manager.h"
-#include "source/opt/ir_context.h"
-#include "source/opt/type_manager.h"
 #include "source/opt/types.h"
 #include "source/util/make_unique.h"
 #include "source/util/parse_number.h"
@@ -30,7 +29,6 @@
 
 namespace spvtools {
 namespace opt {
-
 namespace {
 using utils::EncodeNumberStatus;
 using utils::NumberType;
@@ -130,6 +128,11 @@ std::vector<uint32_t> ParseDefaultValueBitPattern(
       }
       return result;
     }
+  } else if (type->AsArray()) {
+    // This is only for OpSpecConstantDataKHR
+    // Since the length can be a spec constant as well,
+    // we just pass through the bit pattern
+    return std::vector<uint32_t>(input_bit_pattern);
   }
   result.clear();
   return result;
@@ -139,9 +142,10 @@ std::vector<uint32_t> ParseDefaultValueBitPattern(
 // decoration.
 bool CanHaveSpecIdDecoration(const Instruction& inst) {
   switch (inst.opcode()) {
-    case SpvOp::SpvOpSpecConstant:
-    case SpvOp::SpvOpSpecConstantFalse:
-    case SpvOp::SpvOpSpecConstantTrue:
+    case spv::Op::OpSpecConstant:
+    case spv::Op::OpSpecConstantFalse:
+    case spv::Op::OpSpecConstantTrue:
+    case spv::Op::OpSpecConstantDataKHR:
       return true;
     default:
       return false;
@@ -165,7 +169,7 @@ Instruction* GetSpecIdTargetFromDecorationGroup(
   if (def_use_mgr->WhileEachUser(&decoration_group_defining_inst,
                                  [&group_decorate_inst](Instruction* user) {
                                    if (user->opcode() ==
-                                       SpvOp::SpvOpGroupDecorate) {
+                                       spv::Op::OpGroupDecorate) {
                                      group_decorate_inst = user;
                                      return false;
                                    }
@@ -217,16 +221,19 @@ Instruction* GetSpecIdTargetFromDecorationGroup(
 
 Pass::Status SetSpecConstantDefaultValuePass::Process() {
   // The operand index of decoration target in an OpDecorate instruction.
-  const uint32_t kTargetIdOperandIndex = 0;
+  constexpr uint32_t kTargetIdOperandIndex = 0;
   // The operand index of the decoration literal in an OpDecorate instruction.
-  const uint32_t kDecorationOperandIndex = 1;
+  constexpr uint32_t kDecorationOperandIndex = 1;
   // The operand index of Spec id literal value in an OpDecorate SpecId
   // instruction.
-  const uint32_t kSpecIdLiteralOperandIndex = 2;
+  constexpr uint32_t kSpecIdLiteralOperandIndex = 2;
   // The number of operands in an OpDecorate SpecId instruction.
-  const uint32_t kOpDecorateSpecIdNumOperands = 3;
+  constexpr uint32_t kOpDecorateSpecIdNumOperands = 3;
   // The in-operand index of the default value in a OpSpecConstant instruction.
-  const uint32_t kOpSpecConstantLiteralInOperandIndex = 0;
+  constexpr uint32_t kOpSpecConstantLiteralInOperandIndex = 0;
+  // The in-operand index of the default value in a OpSpecConstantData
+  // instruction.
+  constexpr uint32_t kOpSpecConstantDataLiteralInOperandIndex = 0;
 
   bool modified = false;
   // Scan through all the annotation instructions to find 'OpDecorate SpecId'
@@ -240,10 +247,10 @@ Pass::Status SetSpecConstantDefaultValuePass::Process() {
   // default value of the target spec constant.
   for (Instruction& inst : context()->annotations()) {
     // Only process 'OpDecorate SpecId' instructions
-    if (inst.opcode() != SpvOp::SpvOpDecorate) continue;
+    if (inst.opcode() != spv::Op::OpDecorate) continue;
     if (inst.NumOperands() != kOpDecorateSpecIdNumOperands) continue;
     if (inst.GetSingleWordInOperand(kDecorationOperandIndex) !=
-        uint32_t(SpvDecoration::SpvDecorationSpecId)) {
+        uint32_t(spv::Decoration::SpecId)) {
       continue;
     }
 
@@ -255,7 +262,7 @@ Pass::Status SetSpecConstantDefaultValuePass::Process() {
     // target_id might be a decoration group id.
     Instruction* spec_inst = nullptr;
     if (Instruction* target_inst = get_def_use_mgr()->GetDef(target_id)) {
-      if (target_inst->opcode() == SpvOp::SpvOpDecorationGroup) {
+      if (target_inst->opcode() == spv::Op::OpDecorationGroup) {
         spec_inst =
             GetSpecIdTargetFromDecorationGroup(*target_inst, get_def_use_mgr());
       } else {
@@ -301,7 +308,7 @@ Pass::Status SetSpecConstantDefaultValuePass::Process() {
     // Update the operand bit patterns of the spec constant defining
     // instruction.
     switch (spec_inst->opcode()) {
-      case SpvOp::SpvOpSpecConstant:
+      case spv::Op::OpSpecConstant:
         // If the new value is the same with the original value, no
         // need to do anything. Otherwise update the operand words.
         if (spec_inst->GetInOperand(kOpSpecConstantLiteralInOperandIndex)
@@ -311,22 +318,39 @@ Pass::Status SetSpecConstantDefaultValuePass::Process() {
           modified = true;
         }
         break;
-      case SpvOp::SpvOpSpecConstantTrue:
+      case spv::Op::OpSpecConstantTrue:
         // If the new value is also 'true', no need to change anything.
         // Otherwise, set the opcode to OpSpecConstantFalse;
         if (!static_cast<bool>(bit_pattern.front())) {
-          spec_inst->SetOpcode(SpvOp::SpvOpSpecConstantFalse);
+          spec_inst->SetOpcode(spv::Op::OpSpecConstantFalse);
           modified = true;
         }
         break;
-      case SpvOp::SpvOpSpecConstantFalse:
+      case spv::Op::OpSpecConstantFalse:
         // If the new value is also 'false', no need to change anything.
         // Otherwise, set the opcode to OpSpecConstantTrue;
         if (static_cast<bool>(bit_pattern.front())) {
-          spec_inst->SetOpcode(SpvOp::SpvOpSpecConstantTrue);
+          spec_inst->SetOpcode(spv::Op::OpSpecConstantTrue);
           modified = true;
         }
         break;
+      case spv::Op::OpSpecConstantDataKHR: {
+        if (spec_inst->GetInOperand(kOpSpecConstantDataLiteralInOperandIndex)
+                .words != bit_pattern) {
+          std::vector<Operand> operands;
+          // keep the result/type
+          operands.push_back(spec_inst->GetOperand(0u));
+          operands.push_back(spec_inst->GetOperand(1u));
+          // the validator is in charge of making sure the length matches
+          for (uint32_t word : bit_pattern) {
+            operands.emplace_back(SPV_OPERAND_TYPE_LITERAL_INTEGER,
+                                  std::initializer_list<uint32_t>{word});
+          }
+          spec_inst->ReplaceOperands(operands);
+          modified = true;
+        }
+        break;
+      }
       default:
         break;
     }
@@ -339,7 +363,8 @@ Pass::Status SetSpecConstantDefaultValuePass::Process() {
 // Returns true if the given char is ':', '\0' or considered as blank space
 // (i.e.: '\n', '\r', '\v', '\t', '\f' and ' ').
 bool IsSeparator(char ch) {
-  return std::strchr(":\0", ch) || std::isspace(ch) != 0;
+  return std::strchr(":\0", ch) ||
+         std::isspace(static_cast<unsigned char>(ch)) != 0;
 }
 
 std::unique_ptr<SetSpecConstantDefaultValuePass::SpecIdToValueStrMap>
@@ -351,7 +376,8 @@ SetSpecConstantDefaultValuePass::ParseDefaultValuesString(const char* str) {
   // The parsing loop, break when points to the end.
   while (*str) {
     // Find the spec id.
-    while (std::isspace(*str)) str++;  // skip leading spaces.
+    while (std::isspace(static_cast<unsigned char>(*str)))
+      str++;  // skip leading spaces.
     const char* entry_begin = str;
     while (!IsSeparator(*str)) str++;
     const char* entry_end = str;
@@ -383,7 +409,7 @@ SetSpecConstantDefaultValuePass::ParseDefaultValuesString(const char* str) {
     (*spec_id_to_value)[spec_id] = std::string(val_begin, val_end - val_begin);
 
     // Skip trailing spaces.
-    while (std::isspace(*str)) str++;
+    while (std::isspace(static_cast<unsigned char>(*str))) str++;
   }
 
   return spec_id_to_value;

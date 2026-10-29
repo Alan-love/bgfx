@@ -38,11 +38,12 @@ public:
 		bgfx::Init init;
 		init.type     = args.m_type;
 		init.vendorId = args.m_pciId;
-		init.platformData.nwh  = entry::getNativeWindowHandle(entry::kDefaultWindowHandle);
-		init.platformData.ndt  = entry::getNativeDisplayHandle();
-		init.resolution.width  = m_width;
-		init.resolution.height = m_height;
-		init.resolution.reset  = m_reset;
+		init.swapChain.nwh     = entry::getNativeWindowHandle(entry::kDefaultWindowHandle);
+		init.swapChain.ndt     = entry::getNativeDisplayHandle();
+		init.platformData.type = entry::getNativeWindowHandleType();
+		init.swapChain.width  = m_width;
+		init.swapChain.height = m_height;
+		init.reset  = m_reset;
 		bgfx::init(init);
 
 		// Enable debug text.
@@ -115,8 +116,6 @@ public:
 			m_idsU[ii] = rr + (gg << 8) + (bb << 16) + (255u << 24);
 		}
 
-		m_timeOffset = bx::getHPCounter();
-
 		// Set up ID buffer, which has a color target and depth buffer
 		m_pickingRT = bgfx::createTexture2D(ID_DIM, ID_DIM, false, 1, bgfx::TextureFormat::RGBA8, 0
 			| BGFX_TEXTURE_RT
@@ -154,9 +153,12 @@ public:
 			m_pickingRT,
 			m_pickingRTDepth
 		};
+
 		m_pickingFB = bgfx::createFrameBuffer(BX_COUNTOF(rt), rt, true);
 
 		imguiCreate();
+
+		m_frameTime.reset();
 	}
 
 	int shutdown() override
@@ -190,6 +192,9 @@ public:
 	{
 		if (!entry::processEvents(m_width, m_height, m_debug, m_reset, &m_mouseState) )
 		{
+			m_frameTime.frame();
+			const float time = bx::toSeconds<float>(m_frameTime.getDurationTime() );
+
 			// Draw UI
 			imguiBeginFrame(
 				   m_mouseState.m_mx
@@ -202,16 +207,10 @@ public:
 				, uint16_t(m_height)
 				);
 
+			showExampleDialog(this);
+
 			const bgfx::Caps* caps = bgfx::getCaps();
-			bool blitSupport = 0 != (caps->supported & BGFX_CAPS_TEXTURE_BLIT);
 
-			showExampleDialog(this
-				, !blitSupport
-				? "BGFX_CAPS_TEXTURE_BLIT is not supported."
-				: NULL
-				);
-
-			if (blitSupport)
 			{
 				ImGui::SetNextWindowPos(
 					  ImVec2(m_width - m_width / 5.0f - 10.0f, 10.0f)
@@ -233,8 +232,6 @@ public:
 				ImGui::End();
 
 				bgfx::setViewFrameBuffer(RENDER_PASS_ID, m_pickingFB);
-
-				float time = (float)( (bx::getHPCounter() - m_timeOffset) / double(bx::getHPFrequency() ) );
 
 				// Set up matrices for basic forward renderer
 				const float camSpeed = 0.25;
@@ -335,14 +332,6 @@ public:
 						uint8_t bb = *x++;
 						uint8_t aa = *x++;
 
-						if (bgfx::RendererType::Direct3D9 == caps->rendererType)
-						{
-							// Comes back as BGRA
-							uint8_t temp = rr;
-							rr = bb;
-							bb = temp;
-						}
-
 						if (0 == (rr|gg|bb) ) // Skip background
 						{
 							continue;
@@ -388,12 +377,14 @@ public:
 				}
 
 				// Start a new readback?
-				if (!m_reading
-				&&  m_mouseState.m_buttons[entry::MouseButton::Left])
+				if (!ImGui::MouseOverArea()
+				&&  !m_reading
+				&&   m_mouseState.m_buttons[entry::MouseButton::Left]
+				   )
 				{
 					// Blit and read
-					bgfx::blit(RENDER_PASS_BLIT, m_blitTex, 0, 0, m_pickingRT);
-					m_reading = bgfx::readTexture(m_blitTex, m_blitData);
+					bgfx::blit(RENDER_PASS_BLIT, { .handle = m_blitTex }, { .handle = m_pickingRT });
+					m_reading = bgfx::read({ .handle = m_blitTex }, m_blitData);
 				}
 			}
 
@@ -415,7 +406,6 @@ public:
 	uint32_t m_height;
 	uint32_t m_debug;
 	uint32_t m_reset;
-	int64_t m_timeOffset;
 
 	Mesh* m_meshes[12];
 	float m_meshScale[12];
@@ -440,6 +430,8 @@ public:
 
 	float m_fov;
 	bool  m_cameraSpin;
+
+	FrameTime m_frameTime;
 };
 
 } // namespace

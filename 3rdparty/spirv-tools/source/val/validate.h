@@ -31,11 +31,6 @@ class ValidationState_t;
 class BasicBlock;
 class Instruction;
 
-/// A function that returns a vector of BasicBlocks given a BasicBlock. Used to
-/// get the successor and predecessor nodes of a CFG block
-using get_blocks_func =
-    std::function<const std::vector<BasicBlock*>*(const BasicBlock*)>;
-
 /// @brief Performs the Control Flow Graph checks
 ///
 /// @param[in] _ the validation state of the module
@@ -69,8 +64,8 @@ spv_result_t CheckIdDefinitionDominateUse(ValidationState_t& _);
 /// instructions.
 ///
 /// This function will iterate over all instructions and check for any required
-/// predecessor and/or successor instructions. e.g. SpvOpPhi must only be
-/// preceded by SpvOpLabel, SpvOpPhi, or SpvOpLine.
+/// predecessor and/or successor instructions. e.g. spv::Op::OpPhi must only be
+/// preceded by spv::Op::OpLabel, spv::Op::OpPhi, or spv::Op::OpLine.
 ///
 /// @param[in] _ the validation state of the module
 ///
@@ -86,6 +81,25 @@ spv_result_t ValidateAdjacency(ValidationState_t& _);
 ///
 /// @return SPV_SUCCESS if no errors are found.
 spv_result_t ValidateInterfaces(ValidationState_t& _);
+
+/// @brief Validates entry point call tree requirements of
+/// SPV_KHR_float_controls2
+///
+/// Checks that no entry point using FPFastMathDefault uses:
+/// * FPFastMathMode Fast
+/// * NoContraction
+///
+/// @param[in] _ the validation state of the module
+///
+/// @return SPV_SUCCESS if no errors are found.
+spv_result_t ValidateFloatControls2(ValidationState_t& _);
+
+/// @brief Validates duplicated execution modes for each entry point.
+///
+/// @param[in] _ the validation state of the module
+///
+/// @return SPV_SUCCESS if no errors are found.
+spv_result_t ValidateDuplicateExecutionModes(ValidationState_t& _);
 
 /// @brief Validates memory instructions
 ///
@@ -130,6 +144,8 @@ spv_result_t InstructionPass(ValidationState_t& _, const Instruction* inst);
 /// has been propagated down to the group members.
 spv_result_t ValidateDecorations(ValidationState_t& _);
 
+spv_result_t ValidateExplicitLayout(ValidationState_t& _);
+
 /// Performs validation of built-in variables.
 spv_result_t ValidateBuiltIns(ValidationState_t& _);
 
@@ -166,6 +182,12 @@ spv_result_t AtomicsPass(ValidationState_t& _, const Instruction* inst);
 /// Validates correctness of barrier instructions.
 spv_result_t BarriersPass(ValidationState_t& _, const Instruction* inst);
 
+/// Validates correctness of DotProduct instructions.
+spv_result_t DotProductPass(ValidationState_t& _, const Instruction* inst);
+
+/// Validates correctness of Group (Kernel) instructions.
+spv_result_t GroupPass(ValidationState_t& _, const Instruction* inst);
+
 /// Validates correctness of literal numbers.
 spv_result_t LiteralsPass(ValidationState_t& _, const Instruction* inst);
 
@@ -175,14 +197,17 @@ spv_result_t ExtensionPass(ValidationState_t& _, const Instruction* inst);
 /// Validates correctness of annotation instructions.
 spv_result_t AnnotationPass(ValidationState_t& _, const Instruction* inst);
 
+/// Validates correctness of pipe instructions.
+spv_result_t PipePass(ValidationState_t& _, const Instruction* inst);
+
 /// Validates correctness of non-uniform group instructions.
 spv_result_t NonUniformPass(ValidationState_t& _, const Instruction* inst);
 
 /// Validates correctness of debug instructions.
 spv_result_t DebugPass(ValidationState_t& _, const Instruction* inst);
 
-// Validates that capability declarations use operands allowed in the current
-// context.
+/// Validates that capability declarations use operands allowed in the current
+/// context.
 spv_result_t CapabilityPass(ValidationState_t& _, const Instruction* inst);
 
 /// Validates correctness of primitive instructions.
@@ -200,8 +225,32 @@ spv_result_t MiscPass(ValidationState_t& _, const Instruction* inst);
 /// Validates correctness of ray query instructions.
 spv_result_t RayQueryPass(ValidationState_t& _, const Instruction* inst);
 
+/// Validates correctness of ray tracing instructions.
+spv_result_t RayTracingPass(ValidationState_t& _, const Instruction* inst);
+
+/// Validates correctness of shader execution reorder instructions.
+spv_result_t RayReorderNVPass(ValidationState_t& _, const Instruction* inst);
+
+/// Validates correctness of shader execution reorder EXT instructions.
+spv_result_t RayReorderEXTPass(ValidationState_t& _, const Instruction* inst);
+
+/// Validates correctness of mesh shading instructions.
+spv_result_t MeshShadingPass(ValidationState_t& _, const Instruction* inst);
+
+/// Validates correctness of tensor instructions.
+spv_result_t TensorPass(ValidationState_t& _, const Instruction* inst);
+
+/// Validates correctness of graph instructions.
+spv_result_t GraphPass(ValidationState_t& _, const Instruction* inst);
+
+/// Validates correctness of certain special type instructions.
+spv_result_t InvalidTypePass(ValidationState_t& _, const Instruction* inst);
+
 /// Calculates the reachability of basic blocks.
 void ReachabilityPass(ValidationState_t& _);
+
+/// Validates tensor layout and view instructions.
+spv_result_t TensorLayoutPass(ValidationState_t& _, const Instruction* inst);
 
 /// Validates execution limitations.
 ///
@@ -215,6 +264,17 @@ spv_result_t ValidateExecutionLimitations(ValidationState_t& _,
 /// capabilities only have appropriate uses of those types.
 spv_result_t ValidateSmallTypeUses(ValidationState_t& _,
                                    const Instruction* inst);
+
+/// Validates restricted uses of QCOM decorated textures
+///
+/// The textures that are decorated with some of QCOM image processing
+/// decorations must be used in the specified QCOM image processing built-in
+/// functions and not used in any other image functions.
+spv_result_t ValidateQCOMImageProcessingTextureUsages(ValidationState_t& _,
+                                                      const Instruction* inst);
+
+/// Validates logical pointer restrictions.
+spv_result_t ValidateLogicalPointers(ValidationState_t& _);
 
 /// @brief Validate the ID's within a SPIR-V binary
 ///

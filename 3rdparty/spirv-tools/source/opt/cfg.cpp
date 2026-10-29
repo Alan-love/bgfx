@@ -29,16 +29,16 @@ namespace {
 using cbb_ptr = const opt::BasicBlock*;
 
 // Universal Limit of ResultID + 1
-const int kMaxResultId = 0x400000;
+constexpr int kMaxResultId = 0x400000;
 
 }  // namespace
 
 CFG::CFG(Module* module)
     : module_(module),
       pseudo_entry_block_(std::unique_ptr<Instruction>(
-          new Instruction(module->context(), SpvOpLabel, 0, 0, {}))),
+          new Instruction(module->context(), spv::Op::OpLabel, 0, 0, {}))),
       pseudo_exit_block_(std::unique_ptr<Instruction>(new Instruction(
-          module->context(), SpvOpLabel, 0, kMaxResultId, {}))) {
+          module->context(), spv::Op::OpLabel, 0, kMaxResultId, {}))) {
   for (auto& fn : *module) {
     for (auto& blk : fn) {
       RegisterBlock(&blk);
@@ -81,13 +81,12 @@ void CFG::ComputeStructuredOrder(Function* func, BasicBlock* root,
                                  BasicBlock* end,
                                  std::list<BasicBlock*>* order) {
   assert(module_->context()->get_feature_mgr()->HasCapability(
-             SpvCapabilityShader) &&
+             spv::Capability::Shader) &&
          "This only works on structured control flow");
 
   // Compute structured successors and do DFS.
   ComputeStructuredSuccessors(func);
   auto ignore_block = [](cbb_ptr) {};
-  auto ignore_edge = [](cbb_ptr, cbb_ptr) {};
   auto terminal = [end](cbb_ptr bb) { return bb == end; };
 
   auto get_structured_successors = [this](const BasicBlock* b) {
@@ -100,8 +99,7 @@ void CFG::ComputeStructuredOrder(Function* func, BasicBlock* root,
     order->push_front(const_cast<BasicBlock*>(b));
   };
   CFA<BasicBlock>::DepthFirstTraversal(root, get_structured_successors,
-                                       ignore_block, post_order, ignore_edge,
-                                       terminal);
+                                       ignore_block, post_order, terminal);
 }
 
 void CFG::ForEachBlockInPostOrder(BasicBlock* bb,
@@ -230,7 +228,7 @@ BasicBlock* CFG::SplitLoopHeader(BasicBlock* bb) {
   // Create the new header bb basic bb.
   // Leave the phi instructions behind.
   auto iter = bb->begin();
-  while (iter->opcode() == SpvOpPhi) {
+  while (iter->opcode() == spv::Op::OpPhi) {
     ++iter;
   }
 
@@ -256,12 +254,13 @@ BasicBlock* CFG::SplitLoopHeader(BasicBlock* bb) {
   }
 
   // Adjust the OpPhi instructions as needed.
-  bb->ForEachPhiInst([latch_block, bb, new_header, context](Instruction* phi) {
+  bool ok = bb->WhileEachPhiInst([latch_block, bb, new_header,
+                                  context](Instruction* phi) -> bool {
     std::vector<uint32_t> preheader_phi_ops;
     std::vector<Operand> header_phi_ops;
 
-    // Identify where the original inputs to original OpPhi belong: header or
-    // preheader.
+    // Identify where the original inputs to original OpPhi belong: header
+    // or preheader.
     for (uint32_t i = 0; i < phi->NumInOperands(); i += 2) {
       uint32_t def_id = phi->GetSingleWordInOperand(i);
       uint32_t branch_id = phi->GetSingleWordInOperand(i + 1);
@@ -274,21 +273,24 @@ BasicBlock* CFG::SplitLoopHeader(BasicBlock* bb) {
       }
     }
 
-    // Create a phi instruction if and only if the preheader_phi_ops has more
-    // than one pair.
+    // Create a phi instruction if and only if the preheader_phi_ops has
+    // more than one pair.
     if (preheader_phi_ops.size() > 2) {
       InstructionBuilder builder(
           context, &*bb->begin(),
           IRContext::kAnalysisDefUse | IRContext::kAnalysisInstrToBlockMapping);
 
       Instruction* new_phi = builder.AddPhi(phi->type_id(), preheader_phi_ops);
+      if (!new_phi) {
+        return false;
+      }
 
       // Add the OpPhi to the header bb.
       header_phi_ops.push_back({SPV_OPERAND_TYPE_ID, {new_phi->result_id()}});
       header_phi_ops.push_back({SPV_OPERAND_TYPE_ID, {bb->id()}});
     } else {
-      // An OpPhi with a single entry is just a copy.  In this case use the same
-      // instruction in the new header.
+      // An OpPhi with a single entry is just a copy.  In this case use the
+      // same instruction in the new header.
       header_phi_ops.push_back({SPV_OPERAND_TYPE_ID, {preheader_phi_ops[0]}});
       header_phi_ops.push_back({SPV_OPERAND_TYPE_ID, {bb->id()}});
     }
@@ -299,14 +301,19 @@ BasicBlock* CFG::SplitLoopHeader(BasicBlock* bb) {
     new_header->begin()->InsertBefore(std::move(phi_owner));
     context->set_instr_block(phi, new_header);
     context->AnalyzeUses(phi);
+    return true;
   });
+
+  if (!ok) {
+    return nullptr;
+  }
 
   // Add a branch to the new header.
   InstructionBuilder branch_builder(
       context, bb,
       IRContext::kAnalysisDefUse | IRContext::kAnalysisInstrToBlockMapping);
   bb->AddInstruction(
-      MakeUnique<Instruction>(context, SpvOpBranch, 0, 0,
+      MakeUnique<Instruction>(context, spv::Op::OpBranch, 0, 0,
                               std::initializer_list<Operand>{
                                   {SPV_OPERAND_TYPE_ID, {new_header->id()}}}));
   context->AnalyzeUses(bb->terminator());

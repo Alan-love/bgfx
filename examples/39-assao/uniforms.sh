@@ -1,8 +1,8 @@
 uniform vec4 u_params[19];
 uniform vec4 u_rect;
 
-#define u_viewportPixelSize					u_params[0].xy 
-#define u_halfViewportPixelSize				u_params[0].zw 
+#define u_viewportPixelSize					u_params[0].xy
+#define u_halfViewportPixelSize				u_params[0].zw
 #define u_depthUnpackConsts					u_params[1].xy
 #define u_ndcToViewMul						u_params[2].xy
 #define u_ndcToViewAdd						u_params[2].zw
@@ -34,6 +34,18 @@ uniform vec4 u_rect;
 #define u_normalsWorldToViewspaceMatrix1	u_params[16]
 #define u_normalsWorldToViewspaceMatrix2	u_params[17]
 #define u_normalsWorldToViewspaceMatrix3	u_params[18]
+
+// OpenGL ES 3.1 doesn't require r8, rg8, and r16f image formats to be
+// supported, so fall back to formats that are always available there.
+#if BGFX_SHADER_LANGUAGE_ESSL
+#	define ASSAO_AO_FORMAT    rgba8
+#	define ASSAO_SSAO_FORMAT  rgba8
+#	define ASSAO_DEPTH_FORMAT r32f
+#else
+#	define ASSAO_AO_FORMAT    r8
+#	define ASSAO_SSAO_FORMAT  rg8
+#	define ASSAO_DEPTH_FORMAT r16f
+#endif // BGFX_SHADER_LANGUAGE_ESSL
 
 #define SSAO_MAX_TAPS                               32
 #define SSAO_ADAPTIVE_TAP_BASE_COUNT                5

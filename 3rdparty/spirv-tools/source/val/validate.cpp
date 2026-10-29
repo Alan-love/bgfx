@@ -14,29 +14,22 @@
 
 #include "source/val/validate.h"
 
-#include <algorithm>
-#include <cassert>
-#include <cstdio>
 #include <functional>
 #include <iterator>
 #include <memory>
-#include <sstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "source/binary.h"
 #include "source/diagnostic.h"
-#include "source/enum_string_mapping.h"
 #include "source/extensions.h"
-#include "source/instruction.h"
 #include "source/opcode.h"
-#include "source/operand.h"
 #include "source/spirv_constant.h"
 #include "source/spirv_endian.h"
 #include "source/spirv_target_env.h"
-#include "source/spirv_validator_options.h"
+#include "source/table2.h"
 #include "source/val/construct.h"
-#include "source/val/function.h"
 #include "source/val/instruction.h"
 #include "source/val/validation_state.h"
 #include "spirv-tools/libspirv.h"
@@ -66,15 +59,18 @@ void RegisterExtension(ValidationState_t& _,
 
 // Parses the beginning of the module searching for OpExtension instructions.
 // Registers extensions if recognized. Returns SPV_REQUESTED_TERMINATION
-// once an instruction which is not SpvOpCapability and SpvOpExtension is
-// encountered. According to the SPIR-V spec extensions are declared after
-// capabilities and before everything else.
+// once an instruction which is not spv::Op::OpCapability and
+// spv::Op::OpExtension is encountered. According to the SPIR-V spec extensions
+// are declared after capabilities and before everything else.
 spv_result_t ProcessExtensions(void* user_data,
                                const spv_parsed_instruction_t* inst) {
-  const SpvOp opcode = static_cast<SpvOp>(inst->opcode);
-  if (opcode == SpvOpCapability) return SPV_SUCCESS;
+  const spv::Op opcode = static_cast<spv::Op>(inst->opcode);
+  if (opcode == spv::Op::OpCapability ||
+      opcode == spv::Op::OpConditionalCapabilityINTEL)
+    return SPV_SUCCESS;
 
-  if (opcode == SpvOpExtension) {
+  if (opcode == spv::Op::OpExtension ||
+      opcode == spv::Op::OpConditionalExtensionINTEL) {
     ValidationState_t& _ = *(reinterpret_cast<ValidationState_t*>(user_data));
     RegisterExtension(_, inst);
     return SPV_SUCCESS;
@@ -123,10 +119,11 @@ spv_result_t ValidateEntryPoints(ValidationState_t& _) {
   _.ComputeFunctionToEntryPointMapping();
   _.ComputeRecursiveEntryPoints();
 
-  if (_.entry_points().empty() && !_.HasCapability(SpvCapabilityLinkage)) {
+  if (_.entry_points().empty() && !_.HasCapability(spv::Capability::Linkage) &&
+      !_.HasCapability(spv::Capability::GraphARM)) {
     return _.diag(SPV_ERROR_INVALID_BINARY, nullptr)
            << "No OpEntryPoint instruction was found. This is only allowed if "
-              "the Linkage capability is being used.";
+              "the Linkage or GraphARM capability is being used.";
   }
 
   for (const auto& entry_point : _.entry_points()) {
@@ -149,6 +146,23 @@ spv_result_t ValidateEntryPoints(ValidationState_t& _) {
     }
   }
 
+  if (auto error = ValidateFloatControls2(_)) {
+    return error;
+  }
+  if (auto error = ValidateDuplicateExecutionModes(_)) {
+    return error;
+  }
+
+  return SPV_SUCCESS;
+}
+
+spv_result_t ValidateGraphEntryPoints(ValidationState_t& _) {
+  if (_.graph_entry_points().empty() &&
+      _.HasCapability(spv::Capability::GraphARM)) {
+    return _.diag(SPV_ERROR_INVALID_BINARY, nullptr)
+           << "No OpGraphEntryPointARM instruction was found but the GraphARM "
+              "capability is declared.";
+  }
   return SPV_SUCCESS;
 }
 
@@ -209,46 +223,75 @@ spv_result_t ValidateBinaryUsingContextAndValidationState(
     return error;
   }
 
+  bool has_mask_task_nv = false;
+  bool has_mask_task_ext = false;
   std::vector<Instruction*> visited_entry_points;
+  std::unordered_set<std::string> graph_entry_point_names;
   for (auto& instruction : vstate->ordered_instructions()) {
     {
       // In order to do this work outside of Process Instruction we need to be
       // able to, briefly, de-const the instruction.
       Instruction* inst = const_cast<Instruction*>(&instruction);
 
-      if (inst->opcode() == SpvOpEntryPoint) {
-        const auto entry_point = inst->GetOperandAs<uint32_t>(1);
-        const auto execution_model = inst->GetOperandAs<SpvExecutionModel>(0);
-        const std::string desc_name = inst->GetOperandAs<std::string>(2);
+      if ((inst->opcode() == spv::Op::OpEntryPoint) ||
+          (inst->opcode() == spv::Op::OpConditionalEntryPointINTEL)) {
+        const int i_model = inst->opcode() == spv::Op::OpEntryPoint ? 0 : 1;
+        const int i_point = inst->opcode() == spv::Op::OpEntryPoint ? 1 : 2;
+        const int i_name = inst->opcode() == spv::Op::OpEntryPoint ? 2 : 3;
+        const int min_num_operands =
+            inst->opcode() == spv::Op::OpEntryPoint ? 3 : 4;
+
+        const auto entry_point = inst->GetOperandAs<uint32_t>(i_point);
+        const auto execution_model =
+            inst->GetOperandAs<spv::ExecutionModel>(i_model);
+        const std::string desc_name = inst->GetOperandAs<std::string>(i_name);
 
         ValidationState_t::EntryPointDescription desc;
         desc.name = desc_name;
 
         std::vector<uint32_t> interfaces;
-        for (size_t j = 3; j < inst->operands().size(); ++j)
+        for (size_t j = min_num_operands; j < inst->operands().size(); ++j)
           desc.interfaces.push_back(inst->word(inst->operand(j).offset));
 
         vstate->RegisterEntryPoint(entry_point, execution_model,
                                    std::move(desc));
 
-        if (visited_entry_points.size() > 0) {
-          for (const Instruction* check_inst : visited_entry_points) {
-            const auto check_execution_model =
-                check_inst->GetOperandAs<SpvExecutionModel>(0);
-            const std::string check_name =
-                check_inst->GetOperandAs<std::string>(2);
+        if (inst->opcode() == spv::Op::OpEntryPoint) {
+          // conditional entry points are allowed to share the same name and
+          // exec mode
+          if (visited_entry_points.size() > 0) {
+            for (const Instruction* check_inst : visited_entry_points) {
+              const auto check_execution_model =
+                  check_inst->GetOperandAs<spv::ExecutionModel>(i_model);
+              const std::string check_name =
+                  check_inst->GetOperandAs<std::string>(i_name);
 
-            if (desc_name == check_name &&
-                execution_model == check_execution_model) {
-              return vstate->diag(SPV_ERROR_INVALID_DATA, inst)
-                     << "2 Entry points cannot share the same name and "
-                        "ExecutionMode.";
+              if (desc_name == check_name &&
+                  execution_model == check_execution_model) {
+                return vstate->diag(SPV_ERROR_INVALID_DATA, inst)
+                       << "2 Entry points cannot share the same name and "
+                          "ExecutionMode.";
+              }
             }
           }
+          visited_entry_points.push_back(inst);
         }
-        visited_entry_points.push_back(inst);
+
+        has_mask_task_nv |= (execution_model == spv::ExecutionModel::TaskNV ||
+                             execution_model == spv::ExecutionModel::MeshNV);
+        has_mask_task_ext |= (execution_model == spv::ExecutionModel::TaskEXT ||
+                              execution_model == spv::ExecutionModel::MeshEXT);
       }
-      if (inst->opcode() == SpvOpFunctionCall) {
+      if (inst->opcode() == spv::Op::OpGraphEntryPointARM) {
+        const std::string name = inst->GetOperandAs<std::string>(1);
+        if (!graph_entry_point_names.insert(name).second) {
+          return vstate->diag(SPV_ERROR_INVALID_DATA, inst)
+                 << "Graph entry points cannot share the same name.";
+        }
+        const auto graph = inst->GetOperandAs<uint32_t>(0);
+        vstate->RegisterGraphEntryPoint(graph);
+      }
+      if (inst->opcode() == spv::Op::OpFunctionCall) {
         if (!vstate->in_function_body()) {
           return vstate->diag(SPV_ERROR_INVALID_LAYOUT, &instruction)
                  << "A FunctionCall must happen within a function body.";
@@ -279,7 +322,7 @@ spv_result_t ValidateBinaryUsingContextAndValidationState(
     {
       Instruction* inst = const_cast<Instruction*>(&instruction);
       vstate->RegisterInstruction(inst);
-      if (inst->opcode() == SpvOpTypeForwardPointer) {
+      if (inst->opcode() == spv::Op::OpTypeForwardPointer) {
         vstate->RegisterForwardPointer(inst->GetOperandAs<uint32_t>(0));
       }
     }
@@ -293,16 +336,26 @@ spv_result_t ValidateBinaryUsingContextAndValidationState(
     return vstate->diag(SPV_ERROR_INVALID_LAYOUT, nullptr)
            << "Missing OpFunctionEnd at end of module.";
 
-  if (vstate->HasCapability(SpvCapabilityBindlessTextureNV) &&
+  if (vstate->graph_definition_region() != kGraphDefinitionOutside)
+    return vstate->diag(SPV_ERROR_INVALID_LAYOUT, nullptr)
+           << "Missing OpGraphEndARM at end of module.";
+
+  if (vstate->HasCapability(spv::Capability::BindlessTextureNV) &&
       !vstate->has_samplerimage_variable_address_mode_specified())
     return vstate->diag(SPV_ERROR_INVALID_LAYOUT, nullptr)
            << "Missing required OpSamplerImageAddressingModeNV instruction.";
+
+  if (has_mask_task_ext && has_mask_task_nv)
+    return vstate->diag(SPV_ERROR_INVALID_LAYOUT, nullptr)
+           << vstate->VkErrorID(7102)
+           << "Module can't mix MeshEXT/TaskEXT with MeshNV/TaskNV Execution "
+              "Model.";
 
   // Catch undefined forward references before performing further checks.
   if (auto error = ValidateForwardDecls(*vstate)) return error;
 
   // Calculate reachability after all the blocks are parsed, but early that it
-  // can be relied on in subsequent pases.
+  // can be relied on in subsequent passes.
   ReachabilityPass(*vstate);
 
   // ID usage needs be handled in its own iteration of the instructions,
@@ -344,25 +397,37 @@ spv_result_t ValidateBinaryUsingContextAndValidationState(
     if (auto error = AtomicsPass(*vstate, &instruction)) return error;
     if (auto error = PrimitivesPass(*vstate, &instruction)) return error;
     if (auto error = BarriersPass(*vstate, &instruction)) return error;
-    // Group
+    if (auto error = DotProductPass(*vstate, &instruction)) return error;
+    if (auto error = GroupPass(*vstate, &instruction)) return error;
     // Device-Side Enqueue
-    // Pipe
+    if (auto error = PipePass(*vstate, &instruction)) return error;
     if (auto error = NonUniformPass(*vstate, &instruction)) return error;
 
     if (auto error = LiteralsPass(*vstate, &instruction)) return error;
     if (auto error = RayQueryPass(*vstate, &instruction)) return error;
+    if (auto error = RayTracingPass(*vstate, &instruction)) return error;
+    if (auto error = RayReorderNVPass(*vstate, &instruction)) return error;
+    if (auto error = RayReorderEXTPass(*vstate, &instruction)) return error;
+    if (auto error = MeshShadingPass(*vstate, &instruction)) return error;
+    if (auto error = TensorLayoutPass(*vstate, &instruction)) return error;
+    if (auto error = TensorPass(*vstate, &instruction)) return error;
+    if (auto error = GraphPass(*vstate, &instruction)) return error;
+    if (auto error = InvalidTypePass(*vstate, &instruction)) return error;
   }
 
-  // Validate the preconditions involving adjacent instructions. e.g. SpvOpPhi
-  // must only be preceded by SpvOpLabel, SpvOpPhi, or SpvOpLine.
+  // Validate the preconditions involving adjacent instructions. e.g.
+  // spv::Op::OpPhi must only be preceded by spv::Op::OpLabel, spv::Op::OpPhi,
+  // or spv::Op::OpLine.
   if (auto error = ValidateAdjacency(*vstate)) return error;
 
   if (auto error = ValidateEntryPoints(*vstate)) return error;
+  if (auto error = ValidateGraphEntryPoints(*vstate)) return error;
   // CFG checks are performed after the binary has been parsed
   // and the CFGPass has collected information about the control flow
   if (auto error = PerformCfgChecks(*vstate)) return error;
   if (auto error = CheckIdDefinitionDominateUse(*vstate)) return error;
   if (auto error = ValidateDecorations(*vstate)) return error;
+  if (auto error = ValidateExplicitLayout(*vstate)) return error;
   if (auto error = ValidateInterfaces(*vstate)) return error;
   // TODO(dsinclair): Restructure ValidateBuiltins so we can move into the
   // for() above as it loops over all ordered_instructions internally.
@@ -372,7 +437,10 @@ spv_result_t ValidateBinaryUsingContextAndValidationState(
   for (const auto& inst : vstate->ordered_instructions()) {
     if (auto error = ValidateExecutionLimitations(*vstate, &inst)) return error;
     if (auto error = ValidateSmallTypeUses(*vstate, &inst)) return error;
+    if (auto error = ValidateQCOMImageProcessingTextureUsages(*vstate, &inst))
+      return error;
   }
+  if (auto error = ValidateLogicalPointers(*vstate)) return error;
 
   return SPV_SUCCESS;
 }

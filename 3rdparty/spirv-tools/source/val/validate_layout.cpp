@@ -14,18 +14,15 @@
 
 // Source code for logical layout validation as described in section 2.4
 
-#include <cassert>
-
 #include "DebugInfo.h"
-#include "NonSemanticShaderDebugInfo100.h"
 #include "OpenCLDebugInfo100.h"
-#include "source/diagnostic.h"
 #include "source/opcode.h"
 #include "source/operand.h"
 #include "source/val/function.h"
 #include "source/val/instruction.h"
 #include "source/val/validate.h"
 #include "source/val/validation_state.h"
+#include "spirv/unified1/NonSemanticShaderDebugInfo.h"
 
 namespace spvtools {
 namespace val {
@@ -35,9 +32,10 @@ namespace {
 // is part of the current layout section. If it is not then the next sections is
 // checked.
 spv_result_t ModuleScopedInstructions(ValidationState_t& _,
-                                      const Instruction* inst, SpvOp opcode) {
+                                      const Instruction* inst, spv::Op opcode) {
   switch (opcode) {
-    case SpvOpExtInst:
+    case spv::Op::OpExtInst:
+    case spv::Op::OpExtInstWithForwardRefsKHR:
       if (spvExtInstIsDebugInfo(inst->ext_inst_type())) {
         const uint32_t ext_inst_index = inst->word(4);
         bool local_debug_info = false;
@@ -52,16 +50,16 @@ spv_result_t ModuleScopedInstructions(ValidationState_t& _,
           }
         } else if (inst->ext_inst_type() ==
                    SPV_EXT_INST_TYPE_NONSEMANTIC_SHADER_DEBUGINFO_100) {
-          const NonSemanticShaderDebugInfo100Instructions ext_inst_key =
-              NonSemanticShaderDebugInfo100Instructions(ext_inst_index);
-          if (ext_inst_key == NonSemanticShaderDebugInfo100DebugScope ||
-              ext_inst_key == NonSemanticShaderDebugInfo100DebugNoScope ||
-              ext_inst_key == NonSemanticShaderDebugInfo100DebugDeclare ||
-              ext_inst_key == NonSemanticShaderDebugInfo100DebugValue ||
-              ext_inst_key == NonSemanticShaderDebugInfo100DebugLine ||
-              ext_inst_key == NonSemanticShaderDebugInfo100DebugNoLine ||
+          const NonSemanticShaderDebugInfoInstructions ext_inst_key =
+              NonSemanticShaderDebugInfoInstructions(ext_inst_index);
+          if (ext_inst_key == NonSemanticShaderDebugInfoDebugScope ||
+              ext_inst_key == NonSemanticShaderDebugInfoDebugNoScope ||
+              ext_inst_key == NonSemanticShaderDebugInfoDebugDeclare ||
+              ext_inst_key == NonSemanticShaderDebugInfoDebugValue ||
+              ext_inst_key == NonSemanticShaderDebugInfoDebugLine ||
+              ext_inst_key == NonSemanticShaderDebugInfoDebugNoLine ||
               ext_inst_key ==
-                  NonSemanticShaderDebugInfo100DebugFunctionDefinition) {
+                  NonSemanticShaderDebugInfoDebugFunctionDefinition) {
             local_debug_info = true;
           }
         } else {
@@ -77,8 +75,8 @@ spv_result_t ModuleScopedInstructions(ValidationState_t& _,
 
         if (local_debug_info) {
           if (_.in_function_body() == false) {
-            // DebugScope, DebugNoScope, DebugDeclare, DebugValue must
-            // appear in a function body.
+            // TODO - Print the actual name of the instruction as this list is
+            // not complete (see ext_inst_name in ValidateExtInst() for example)
             return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
                    << "DebugScope, DebugNoScope, DebugDeclare, DebugValue "
                    << "of debug info extension must appear in a function "
@@ -131,7 +129,7 @@ spv_result_t ModuleScopedInstructions(ValidationState_t& _,
 
     switch (_.current_layout_section()) {
       case kLayoutMemoryModel:
-        if (opcode != SpvOpMemoryModel) {
+        if (opcode != spv::Op::OpMemoryModel) {
           return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
                  << spvOpcodeString(opcode)
                  << " cannot appear before the memory model instruction";
@@ -154,7 +152,8 @@ spv_result_t ModuleScopedInstructions(ValidationState_t& _,
 // inside of another function. This stage ends when the first label is
 // encountered inside of a function.
 spv_result_t FunctionScopedInstructions(ValidationState_t& _,
-                                        const Instruction* inst, SpvOp opcode) {
+                                        const Instruction* inst,
+                                        spv::Op opcode) {
   // Make sure we advance into the function definitions when we hit
   // non-function declaration instructions.
   if (_.current_layout_section() == kLayoutFunctionDeclarations &&
@@ -171,12 +170,12 @@ spv_result_t FunctionScopedInstructions(ValidationState_t& _,
 
   if (_.IsOpcodeInCurrentLayoutSection(opcode)) {
     switch (opcode) {
-      case SpvOpFunction: {
+      case spv::Op::OpFunction: {
         if (_.in_function_body()) {
           return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
                  << "Cannot declare a function in a function body";
         }
-        auto control_mask = inst->GetOperandAs<SpvFunctionControlMask>(2);
+        auto control_mask = inst->GetOperandAs<spv::FunctionControlMask>(2);
         if (auto error =
                 _.RegisterFunction(inst->id(), inst->type_id(), control_mask,
                                    inst->GetOperandAs<uint32_t>(3)))
@@ -188,7 +187,7 @@ spv_result_t FunctionScopedInstructions(ValidationState_t& _,
         }
       } break;
 
-      case SpvOpFunctionParameter:
+      case spv::Op::OpFunctionParameter:
         if (_.in_function_body() == false) {
           return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
                  << "Function parameter instructions must be in a "
@@ -204,7 +203,7 @@ spv_result_t FunctionScopedInstructions(ValidationState_t& _,
           return error;
         break;
 
-      case SpvOpFunctionEnd:
+      case spv::Op::OpFunctionEnd:
         if (_.in_function_body() == false) {
           return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
                  << "Function end instructions must be in a function body";
@@ -227,10 +226,10 @@ spv_result_t FunctionScopedInstructions(ValidationState_t& _,
         if (auto error = _.RegisterFunctionEnd()) return error;
         break;
 
-      case SpvOpLine:
-      case SpvOpNoLine:
+      case spv::Op::OpLine:
+      case spv::Op::OpNoLine:
         break;
-      case SpvOpLabel:
+      case spv::Op::OpLabel:
         // If the label is encountered then the current function is a
         // definition so set the function to a declaration and update the
         // module section
@@ -244,7 +243,8 @@ spv_result_t FunctionScopedInstructions(ValidationState_t& _,
         }
         break;
 
-      case SpvOpExtInst:
+      case spv::Op::OpExtInst:
+      case spv::Op::OpExtInstWithForwardRefsKHR:
         if (spvExtInstIsDebugInfo(inst->ext_inst_type())) {
           const uint32_t ext_inst_index = inst->word(4);
           bool local_debug_info = false;
@@ -259,16 +259,16 @@ spv_result_t FunctionScopedInstructions(ValidationState_t& _,
             }
           } else if (inst->ext_inst_type() ==
                      SPV_EXT_INST_TYPE_NONSEMANTIC_SHADER_DEBUGINFO_100) {
-            const NonSemanticShaderDebugInfo100Instructions ext_inst_key =
-                NonSemanticShaderDebugInfo100Instructions(ext_inst_index);
-            if (ext_inst_key == NonSemanticShaderDebugInfo100DebugScope ||
-                ext_inst_key == NonSemanticShaderDebugInfo100DebugNoScope ||
-                ext_inst_key == NonSemanticShaderDebugInfo100DebugDeclare ||
-                ext_inst_key == NonSemanticShaderDebugInfo100DebugValue ||
-                ext_inst_key == NonSemanticShaderDebugInfo100DebugLine ||
-                ext_inst_key == NonSemanticShaderDebugInfo100DebugNoLine ||
+            const NonSemanticShaderDebugInfoInstructions ext_inst_key =
+                NonSemanticShaderDebugInfoInstructions(ext_inst_index);
+            if (ext_inst_key == NonSemanticShaderDebugInfoDebugScope ||
+                ext_inst_key == NonSemanticShaderDebugInfoDebugNoScope ||
+                ext_inst_key == NonSemanticShaderDebugInfoDebugDeclare ||
+                ext_inst_key == NonSemanticShaderDebugInfoDebugValue ||
+                ext_inst_key == NonSemanticShaderDebugInfoDebugLine ||
+                ext_inst_key == NonSemanticShaderDebugInfoDebugNoLine ||
                 ext_inst_key ==
-                    NonSemanticShaderDebugInfo100DebugFunctionDefinition) {
+                    NonSemanticShaderDebugInfoDebugFunctionDefinition) {
               local_debug_info = true;
             }
           } else {
@@ -342,13 +342,89 @@ spv_result_t FunctionScopedInstructions(ValidationState_t& _,
         break;
     }
   } else {
-    return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
-           << spvOpcodeString(opcode)
-           << " cannot appear in a function declaration";
+    _.ProgressToNextLayoutSectionOrder();
+    // All function sections have been processed. Recursively call
+    // ModuleLayoutPass to process the next section of the module
+    return ModuleLayoutPass(_, inst);
   }
   return SPV_SUCCESS;
 }
 
+spv_result_t GraphScopedInstructions(ValidationState_t& _,
+                                     const Instruction* inst, spv::Op opcode) {
+  if (_.IsOpcodeInCurrentLayoutSection(opcode)) {
+    switch (opcode) {
+      case spv::Op::OpGraphARM: {
+        if (_.graph_definition_region() > kGraphDefinitionOutside) {
+          return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
+                 << "Cannot define a graph in a graph";
+        }
+        _.SetGraphDefinitionRegion(kGraphDefinitionBegin);
+      } break;
+      case spv::Op::OpGraphInputARM: {
+        if ((_.graph_definition_region() != kGraphDefinitionBegin) &&
+            (_.graph_definition_region() != kGraphDefinitionInputs)) {
+          return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
+                 << "OpGraphInputARM"
+                 << " must immediately follow an OpGraphARM or OpGraphInputARM "
+                    "instruction.";
+        }
+        _.SetGraphDefinitionRegion(kGraphDefinitionInputs);
+      } break;
+      case spv::Op::OpGraphSetOutputARM: {
+        if ((_.graph_definition_region() != kGraphDefinitionBegin) &&
+            (_.graph_definition_region() != kGraphDefinitionInputs) &&
+            (_.graph_definition_region() != kGraphDefinitionBody) &&
+            (_.graph_definition_region() != kGraphDefinitionOutputs)) {
+          return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
+                 << "Op" << spvOpcodeString(opcode)
+                 << " must immediately precede an OpGraphEndARM or "
+                    "OpGraphSetOutputARM instruction.";
+        }
+        _.SetGraphDefinitionRegion(kGraphDefinitionOutputs);
+      } break;
+      case spv::Op::OpGraphEndARM: {
+        if (_.graph_definition_region() != kGraphDefinitionOutputs) {
+          return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
+                 << spvOpcodeString(opcode)
+                 << " must be preceded by at least one OpGraphSetOutputARM "
+                    "instruction";
+        }
+        _.SetGraphDefinitionRegion(kGraphDefinitionOutside);
+      } break;
+      case spv::Op::OpGraphEntryPointARM:
+        if (_.graph_definition_region() != kGraphDefinitionOutside) {
+          return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
+                 << spvOpcodeString(opcode)
+                 << " cannot appear in the definition of a graph";
+        }
+        break;
+      default:
+        if ((opcode == spv::Op::OpExtInst) &&
+            spvExtInstIsNonSemantic(inst->ext_inst_type())) {
+          break;
+        }
+
+        if (_.graph_definition_region() == kGraphDefinitionOutside) {
+          return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
+                 << "Op" << spvOpcodeString(opcode)
+                 << " must appear in a graph body";
+        }
+        if (_.graph_definition_region() == kGraphDefinitionOutputs) {
+          return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
+                 << spvOpcodeString(opcode)
+                 << " cannot appear after a graph output instruction";
+        }
+        _.SetGraphDefinitionRegion(kGraphDefinitionBody);
+        break;
+    }
+  } else {
+    return _.diag(SPV_ERROR_INVALID_LAYOUT, inst)
+           << "Op" << spvOpcodeString(opcode)
+           << " cannot appear in the graph definitions section";
+  }
+  return SPV_SUCCESS;
+}
 }  // namespace
 
 // TODO(umar): Check linkage capabilities for function declarations
@@ -356,7 +432,7 @@ spv_result_t FunctionScopedInstructions(ValidationState_t& _,
 // NOTE: This function does not handle CFG related validation
 // Performs logical layout validation. See Section 2.4
 spv_result_t ModuleLayoutPass(ValidationState_t& _, const Instruction* inst) {
-  const SpvOp opcode = inst->opcode();
+  const spv::Op opcode = inst->opcode();
 
   switch (_.current_layout_section()) {
     case kLayoutCapabilities:
@@ -376,6 +452,11 @@ spv_result_t ModuleLayoutPass(ValidationState_t& _, const Instruction* inst) {
     case kLayoutFunctionDeclarations:
     case kLayoutFunctionDefinitions:
       if (auto error = FunctionScopedInstructions(_, inst, opcode)) {
+        return error;
+      }
+      break;
+    case kLayoutGraphDefinitions:
+      if (auto error = GraphScopedInstructions(_, inst, opcode)) {
         return error;
       }
       break;

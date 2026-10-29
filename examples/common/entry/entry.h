@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2022 Branimir Karadzic. All rights reserved.
+ * Copyright 2011-2026 Branimir Karadzic. All rights reserved.
  * License: https://github.com/bkaradzic/bgfx/blob/master/LICENSE
  */
 
@@ -7,6 +7,7 @@
 #define ENTRY_H_HEADER_GUARD
 
 #include "dbg.h"
+#include <bgfx/bgfx.h>
 #include <bx/bx.h>
 #include <bx/filepath.h>
 #include <bx/string.h>
@@ -298,6 +299,9 @@ namespace entry
 	void* getNativeDisplayHandle();
 
 	///
+	bgfx::NativeWindowHandleType::Enum getNativeWindowHandleType();
+
+	///
 	void setCurrentDir(const char* _dir);
 
 	///
@@ -365,6 +369,12 @@ namespace entry
 
 	///
 	int runApp(AppI* _app, int _argc, const char* const* _argv);
+
+	///
+	void setRestartArgs(const char* _args);
+
+	///
+	bx::Ticks getFixedTimeStep();
 
 } // namespace entry
 

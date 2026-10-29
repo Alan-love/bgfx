@@ -17,8 +17,10 @@
 
 #include <algorithm>
 #include <functional>
+#include <iterator>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -38,6 +40,7 @@ class Function {
  public:
   using iterator = UptrVectorIterator<BasicBlock>;
   using const_iterator = UptrVectorIterator<BasicBlock, true>;
+  using ParamList = std::vector<std::unique_ptr<Instruction>>;
 
   // Creates a function instance declared by the given OpFunction instruction
   // |def_inst|.
@@ -45,7 +48,7 @@ class Function {
 
   explicit Function(const Function& f) = delete;
 
-  // Creates a clone of the instruction in the given |context|
+  // Creates a clone of the function in the given |context|
   //
   // The parent module will default to null and needs to be explicitly set by
   // the user.
@@ -75,6 +78,23 @@ class Function {
   // Removes a parameter from the function with result id equal to |id|.
   // Does nothing if the function doesn't have such a parameter.
   inline void RemoveParameter(uint32_t id);
+
+  // Rewrites the function parameters by calling a replacer callback.
+  // The replacer takes two parameters: an expiring unique pointer to a current
+  // instruction, and a back-inserter into a new list of unique pointers to
+  // instructions.  The replacer is called for each current parameter, in order.
+  // Not valid to call while also iterating through the parameter list, e.g.
+  // within the ForEachParam method.
+  using RewriteParamFn = std::function<void(
+      std::unique_ptr<Instruction>&&, std::back_insert_iterator<ParamList>&)>;
+  void RewriteParams(RewriteParamFn& replacer) {
+    ParamList new_params;
+    auto appender = std::back_inserter(new_params);
+    for (auto& param : params_) {
+      replacer(std::move(param), appender);
+    }
+    params_ = std::move(new_params);
+  }
 
   // Saves the given function end instruction.
   inline void SetFunctionEnd(std::unique_ptr<Instruction> end_inst);
@@ -180,11 +200,23 @@ class Function {
   // Returns true is a function declaration and not a function definition.
   bool IsDeclaration() { return begin() == end(); }
 
+  // Reorders the basic blocks in the function to match the structured order.
+  void ReorderBasicBlocksInStructuredOrder();
+
  private:
+  // Reorders the basic blocks in the function to match the order given by the
+  // range |{begin,end}|.  The range must contain every basic block in the
+  // function, and no extras.
+  template <class It>
+  void ReorderBasicBlocks(It begin, It end);
+
+  template <class It>
+  bool ContainsAllBlocksInTheFunction(It begin, It end);
+
   // The OpFunction instruction that begins the definition of this function.
   std::unique_ptr<Instruction> def_inst_;
   // All parameters to this function.
-  std::vector<std::unique_ptr<Instruction>> params_;
+  ParamList params_;
   // All debug instructions in this function's header.
   InstructionList debug_insts_in_header_;
   // All basic blocks inside this function in specification order
@@ -240,7 +272,7 @@ inline void Function::RemoveEmptyBlocks() {
   auto first_empty =
       std::remove_if(std::begin(blocks_), std::end(blocks_),
                      [](const std::unique_ptr<BasicBlock>& bb) -> bool {
-                       return bb->GetLabelInst()->opcode() == SpvOpNop;
+                       return bb->GetLabelInst()->opcode() == spv::Op::OpNop;
                      });
   blocks_.erase(first_empty, std::end(blocks_));
 }
@@ -260,6 +292,34 @@ inline void Function::SetFunctionEnd(std::unique_ptr<Instruction> end_inst) {
 inline void Function::AddNonSemanticInstruction(
     std::unique_ptr<Instruction> non_semantic) {
   non_semantic_.emplace_back(std::move(non_semantic));
+}
+
+template <class It>
+void Function::ReorderBasicBlocks(It begin, It end) {
+  // Asserts to make sure every node in the function is in new_order.
+  assert(ContainsAllBlocksInTheFunction(begin, end));
+
+  // We have a pointer to all the elements in order, so we can release all
+  // pointers in |block_|, and then create the new unique pointers from |{begin,
+  // end}|.
+  std::for_each(blocks_.begin(), blocks_.end(),
+                [](std::unique_ptr<BasicBlock>& bb) { bb.release(); });
+  std::transform(begin, end, blocks_.begin(), [](BasicBlock* bb) {
+    return std::unique_ptr<BasicBlock>(bb);
+  });
+}
+
+template <class It>
+bool Function::ContainsAllBlocksInTheFunction(It begin, It end) {
+  std::unordered_multiset<BasicBlock*> range(begin, end);
+  if (range.size() != blocks_.size()) {
+    return false;
+  }
+
+  for (auto& bb : blocks_) {
+    if (range.count(bb.get()) == 0) return false;
+  }
+  return true;
 }
 
 }  // namespace opt

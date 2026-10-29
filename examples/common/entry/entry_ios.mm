@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2022 Branimir Karadzic. All rights reserved.
+ * Copyright 2011-2026 Branimir Karadzic. All rights reserved.
  * License: https://github.com/bkaradzic/bgfx/blob/master/LICENSE
  */
 
@@ -9,17 +9,10 @@
 
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
-#import <QuartzCore/CAEAGLLayer.h>
+#import <QuartzCore/CAMetalLayer.h>
 
-#if __IPHONE_8_0 && !TARGET_IPHONE_SIMULATOR  // check if sdk/target supports metal
-#   import <Metal/Metal.h>
-#   import <QuartzCore/CAMetalLayer.h>
-#   define HAS_METAL_SDK
-#endif
+#include <bgfx/bgfx.h>
 
-#include <bgfx/platform.h>
-
-#include <bx/uint32_t.h>
 #include <bx/thread.h>
 
 namespace entry
@@ -150,7 +143,7 @@ namespace entry
 	{
 		if (kDefaultWindowHandle.idx == _handle.idx)
 		{
-			return s_ctx.m_window;
+			return s_ctx->m_window;
 		}
 
 		return NULL;
@@ -159,6 +152,11 @@ namespace entry
 	void* getNativeDisplayHandle()
 	{
 		return NULL;
+	}
+
+	bgfx::NativeWindowHandleType::Enum getNativeWindowHandleType()
+	{
+		return bgfx::NativeWindowHandleType::Default;
 	}
 
 } // namespace entry
@@ -186,21 +184,7 @@ using namespace entry;
 
 + (Class)layerClass
 {
-#ifdef HAS_METAL_SDK
-	static id<MTLDevice> device = NULL;
-	Class metalClass = NSClassFromString(@"CAMetalLayer");    //is metal runtime sdk available
-	if ( metalClass != nil)
-	{
-		device = MTLCreateSystemDefaultDevice(); // is metal supported on this device (is there a better way to do this - without creating device ?)
-		if (NULL != device)
-		{
-			[device retain];
-			return metalClass;
-		}
-	}
-#endif
-
-	return [CAEAGLLayer class];
+	return [CAMetalLayer class];
 }
 
 - (id)initWithFrame:(CGRect)rect
@@ -211,8 +195,6 @@ using namespace entry;
 	{
 		return nil;
 	}
-
-	s_ctx->m_window = self.layer;
 
 	return self;
 }
@@ -335,6 +317,7 @@ using namespace entry;
 	[m_view setContentScaleFactor: scaleFactor ];
 
 	s_ctx = new Context((uint32_t)(scaleFactor*rect.size.width), (uint32_t)(scaleFactor*rect.size.height));
+	s_ctx->m_window = m_view.layer;
 	return YES;
 }
 

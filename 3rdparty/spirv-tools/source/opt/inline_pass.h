@@ -44,7 +44,7 @@ class InlinePass : public Pass {
 
   // Add pointer to type to module and return resultId.  Returns 0 if the type
   // could not be created.
-  uint32_t AddPointerToType(uint32_t type_id, SpvStorageClass storage_class);
+  uint32_t AddPointerToType(uint32_t type_id, spv::StorageClass storage_class);
 
   // Add unconditional branch to labelId to end of block block_ptr.
   void AddBranch(uint32_t labelId, std::unique_ptr<BasicBlock>* block_ptr);
@@ -139,9 +139,9 @@ class InlinePass : public Pass {
   // Return true if |func| is a function that can be inlined.
   bool IsInlinableFunction(Function* func);
 
-  // Returns true if |func| contains an OpKill or OpTerminateInvocation
-  // instruction.
-  bool ContainsKillOrTerminateInvocation(Function* func) const;
+  // Returns true if |func| contains an abort instruction that is not an
+  // `OpUnreachable` instruction.
+  bool ContainsAbortOtherThanUnreachable(Function* func) const;
 
   // Update phis in succeeding blocks to point to new last block
   void UpdateSucceedingPhis(
@@ -149,6 +149,12 @@ class InlinePass : public Pass {
 
   // Initialize state for optimization of |module|
   void InitializeInline();
+
+  // Fixes invalid debug declare functions in `func` that were caused by
+  // inlining. This function cannot be called while in the middle of inlining
+  // because it needs to be able to find the instructions that define an
+  // id.
+  void FixDebugDeclares(Function* func);
 
   // Map from function's result id to function.
   std::unordered_map<uint32_t, Function*> id2function_;
@@ -241,6 +247,11 @@ class InlinePass : public Pass {
   // structural dominance.
   void UpdateSingleBlockLoopContinueTarget(
       uint32_t new_id, std::vector<std::unique_ptr<BasicBlock>>* new_blocks);
+
+  // Replaces the `var` operand of `dbg_declare_inst` and updates the indexes
+  // accordingly, if it is the id of an access chain in `access_chains`.
+  void FixDebugDeclare(Instruction* dbg_declare_inst,
+                       const std::map<uint32_t, Instruction*>& access_chains);
 };
 
 }  // namespace opt

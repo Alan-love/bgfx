@@ -23,24 +23,26 @@
 #include "source/opt/reflect.h"
 #include "source/util/make_unique.h"
 
-// Indices of operands in SPIR-V instructions
-
-static const int kSpvFunctionCallFunctionId = 2;
-static const int kSpvFunctionCallArgumentId = 3;
-static const int kSpvReturnValueId = 0;
-
 namespace spvtools {
 namespace opt {
+namespace {
+// Indices of operands in SPIR-V instructions
+constexpr int kSpvFunctionCallFunctionId = 2;
+constexpr int kSpvFunctionCallArgumentId = 3;
+constexpr int kSpvReturnValueId = 0;
+constexpr int kSpvDebugDeclareVarInIdx = 3;
+constexpr int kSpvAccessChainBaseInIdx = 0;
+}  // namespace
 
 uint32_t InlinePass::AddPointerToType(uint32_t type_id,
-                                      SpvStorageClass storage_class) {
+                                      spv::StorageClass storage_class) {
   uint32_t resultId = context()->TakeNextId();
   if (resultId == 0) {
     return resultId;
   }
 
   std::unique_ptr<Instruction> type_inst(
-      new Instruction(context(), SpvOpTypePointer, 0, resultId,
+      new Instruction(context(), spv::Op::OpTypePointer, 0, resultId,
                       {{spv_operand_type_t::SPV_OPERAND_TYPE_STORAGE_CLASS,
                         {uint32_t(storage_class)}},
                        {spv_operand_type_t::SPV_OPERAND_TYPE_ID, {type_id}}}));
@@ -48,8 +50,8 @@ uint32_t InlinePass::AddPointerToType(uint32_t type_id,
   analysis::Type* pointeeTy;
   std::unique_ptr<analysis::Pointer> pointerTy;
   std::tie(pointeeTy, pointerTy) =
-      context()->get_type_mgr()->GetTypeAndPointerType(type_id,
-                                                       SpvStorageClassFunction);
+      context()->get_type_mgr()->GetTypeAndPointerType(
+          type_id, spv::StorageClass::Function);
   context()->get_type_mgr()->RegisterType(resultId, *pointerTy);
   return resultId;
 }
@@ -57,7 +59,7 @@ uint32_t InlinePass::AddPointerToType(uint32_t type_id,
 void InlinePass::AddBranch(uint32_t label_id,
                            std::unique_ptr<BasicBlock>* block_ptr) {
   std::unique_ptr<Instruction> newBranch(
-      new Instruction(context(), SpvOpBranch, 0, 0,
+      new Instruction(context(), spv::Op::OpBranch, 0, 0,
                       {{spv_operand_type_t::SPV_OPERAND_TYPE_ID, {label_id}}}));
   (*block_ptr)->AddInstruction(std::move(newBranch));
 }
@@ -66,7 +68,7 @@ void InlinePass::AddBranchCond(uint32_t cond_id, uint32_t true_id,
                                uint32_t false_id,
                                std::unique_ptr<BasicBlock>* block_ptr) {
   std::unique_ptr<Instruction> newBranch(
-      new Instruction(context(), SpvOpBranchConditional, 0, 0,
+      new Instruction(context(), spv::Op::OpBranchConditional, 0, 0,
                       {{spv_operand_type_t::SPV_OPERAND_TYPE_ID, {cond_id}},
                        {spv_operand_type_t::SPV_OPERAND_TYPE_ID, {true_id}},
                        {spv_operand_type_t::SPV_OPERAND_TYPE_ID, {false_id}}}));
@@ -76,7 +78,7 @@ void InlinePass::AddBranchCond(uint32_t cond_id, uint32_t true_id,
 void InlinePass::AddLoopMerge(uint32_t merge_id, uint32_t continue_id,
                               std::unique_ptr<BasicBlock>* block_ptr) {
   std::unique_ptr<Instruction> newLoopMerge(new Instruction(
-      context(), SpvOpLoopMerge, 0, 0,
+      context(), spv::Op::OpLoopMerge, 0, 0,
       {{spv_operand_type_t::SPV_OPERAND_TYPE_ID, {merge_id}},
        {spv_operand_type_t::SPV_OPERAND_TYPE_ID, {continue_id}},
        {spv_operand_type_t::SPV_OPERAND_TYPE_LOOP_CONTROL, {0}}}));
@@ -88,7 +90,7 @@ void InlinePass::AddStore(uint32_t ptr_id, uint32_t val_id,
                           const Instruction* line_inst,
                           const DebugScope& dbg_scope) {
   std::unique_ptr<Instruction> newStore(
-      new Instruction(context(), SpvOpStore, 0, 0,
+      new Instruction(context(), spv::Op::OpStore, 0, 0,
                       {{spv_operand_type_t::SPV_OPERAND_TYPE_ID, {ptr_id}},
                        {spv_operand_type_t::SPV_OPERAND_TYPE_ID, {val_id}}}));
   if (line_inst != nullptr) {
@@ -103,7 +105,7 @@ void InlinePass::AddLoad(uint32_t type_id, uint32_t resultId, uint32_t ptr_id,
                          const Instruction* line_inst,
                          const DebugScope& dbg_scope) {
   std::unique_ptr<Instruction> newLoad(
-      new Instruction(context(), SpvOpLoad, type_id, resultId,
+      new Instruction(context(), spv::Op::OpLoad, type_id, resultId,
                       {{spv_operand_type_t::SPV_OPERAND_TYPE_ID, {ptr_id}}}));
   if (line_inst != nullptr) {
     newLoad->AddDebugLine(line_inst);
@@ -114,27 +116,27 @@ void InlinePass::AddLoad(uint32_t type_id, uint32_t resultId, uint32_t ptr_id,
 
 std::unique_ptr<Instruction> InlinePass::NewLabel(uint32_t label_id) {
   std::unique_ptr<Instruction> newLabel(
-      new Instruction(context(), SpvOpLabel, 0, label_id, {}));
+      new Instruction(context(), spv::Op::OpLabel, 0, label_id, {}));
   return newLabel;
 }
 
 uint32_t InlinePass::GetFalseId() {
   if (false_id_ != 0) return false_id_;
-  false_id_ = get_module()->GetGlobalValue(SpvOpConstantFalse);
+  false_id_ = get_module()->GetGlobalValue(spv::Op::OpConstantFalse);
   if (false_id_ != 0) return false_id_;
-  uint32_t boolId = get_module()->GetGlobalValue(SpvOpTypeBool);
+  uint32_t boolId = get_module()->GetGlobalValue(spv::Op::OpTypeBool);
   if (boolId == 0) {
     boolId = context()->TakeNextId();
     if (boolId == 0) {
       return 0;
     }
-    get_module()->AddGlobalValue(SpvOpTypeBool, boolId, 0);
+    get_module()->AddGlobalValue(spv::Op::OpTypeBool, boolId, 0);
   }
   false_id_ = context()->TakeNextId();
   if (false_id_ == 0) {
     return 0;
   }
-  get_module()->AddGlobalValue(SpvOpConstantFalse, false_id_, boolId);
+  get_module()->AddGlobalValue(spv::Op::OpConstantFalse, false_id_, boolId);
   return false_id_;
 }
 
@@ -157,10 +159,10 @@ bool InlinePass::CloneAndMapLocals(
     analysis::DebugInlinedAtContext* inlined_at_ctx) {
   auto callee_block_itr = calleeFn->begin();
   auto callee_var_itr = callee_block_itr->begin();
-  while (callee_var_itr->opcode() == SpvOp::SpvOpVariable ||
+  while (callee_var_itr->opcode() == spv::Op::OpVariable ||
          callee_var_itr->GetCommonDebugOpcode() ==
              CommonDebugInfoDebugDeclare) {
-    if (callee_var_itr->opcode() != SpvOp::SpvOpVariable) {
+    if (callee_var_itr->opcode() != spv::Op::OpVariable) {
       ++callee_var_itr;
       continue;
     }
@@ -191,10 +193,11 @@ uint32_t InlinePass::CreateReturnVar(
          "Cannot create a return variable of type void.");
   // Find or create ptr to callee return type.
   uint32_t returnVarTypeId =
-      type_mgr->FindPointerToType(calleeTypeId, SpvStorageClassFunction);
+      type_mgr->FindPointerToType(calleeTypeId, spv::StorageClass::Function);
 
   if (returnVarTypeId == 0) {
-    returnVarTypeId = AddPointerToType(calleeTypeId, SpvStorageClassFunction);
+    returnVarTypeId =
+        AddPointerToType(calleeTypeId, spv::StorageClass::Function);
     if (returnVarTypeId == 0) {
       return 0;
     }
@@ -206,17 +209,31 @@ uint32_t InlinePass::CreateReturnVar(
     return 0;
   }
 
-  std::unique_ptr<Instruction> var_inst(
-      new Instruction(context(), SpvOpVariable, returnVarTypeId, returnVarId,
-                      {{spv_operand_type_t::SPV_OPERAND_TYPE_STORAGE_CLASS,
-                        {SpvStorageClassFunction}}}));
+  std::unique_ptr<Instruction> var_inst(new Instruction(
+      context(), spv::Op::OpVariable, returnVarTypeId, returnVarId,
+      {{spv_operand_type_t::SPV_OPERAND_TYPE_STORAGE_CLASS,
+        {(uint32_t)spv::StorageClass::Function}}}));
   new_vars->push_back(std::move(var_inst));
   get_decoration_mgr()->CloneDecorations(calleeFn->result_id(), returnVarId);
+
+  // Decorate the return var with AliasedPointer if the storage class of the
+  // pointee type is PhysicalStorageBuffer.
+  auto const pointee_type =
+      type_mgr->GetType(returnVarTypeId)->AsPointer()->pointee_type();
+  if (pointee_type->AsPointer() != nullptr) {
+    if (pointee_type->AsPointer()->storage_class() ==
+        spv::StorageClass::PhysicalStorageBuffer) {
+      get_decoration_mgr()->AddDecoration(
+          returnVarId, uint32_t(spv::Decoration::AliasedPointer));
+    }
+  }
+
   return returnVarId;
 }
 
 bool InlinePass::IsSameBlockOp(const Instruction* inst) const {
-  return inst->opcode() == SpvOpSampledImage || inst->opcode() == SpvOpImage;
+  return inst->opcode() == spv::Op::OpSampledImage ||
+         inst->opcode() == spv::Op::OpImage;
 }
 
 bool InlinePass::CloneSameBlockOps(
@@ -299,9 +316,9 @@ InstructionList::iterator InlinePass::AddStoresForVariableInitializers(
     std::unique_ptr<BasicBlock>* new_blk_ptr,
     UptrVectorIterator<BasicBlock> callee_first_block_itr) {
   auto callee_itr = callee_first_block_itr->begin();
-  while (callee_itr->opcode() == SpvOp::SpvOpVariable ||
+  while (callee_itr->opcode() == spv::Op::OpVariable ||
          callee_itr->GetCommonDebugOpcode() == CommonDebugInfoDebugDeclare) {
-    if (callee_itr->opcode() == SpvOp::SpvOpVariable &&
+    if (callee_itr->opcode() == spv::Op::OpVariable &&
         callee_itr->NumInOperands() == 2) {
       assert(callee2caller.count(callee_itr->result_id()) &&
              "Expected the variable to have already been mapped.");
@@ -330,7 +347,8 @@ bool InlinePass::InlineSingleInstruction(
     BasicBlock* new_blk_ptr, const Instruction* inst, uint32_t dbg_inlined_at) {
   // If we have return, it must be at the end of the callee. We will handle
   // it at the end.
-  if (inst->opcode() == SpvOpReturnValue || inst->opcode() == SpvOpReturn)
+  if (inst->opcode() == spv::Op::OpReturnValue ||
+      inst->opcode() == spv::Op::OpReturn)
     return true;
 
   // Copy callee instruction and remap all input Ids.
@@ -366,7 +384,7 @@ std::unique_ptr<BasicBlock> InlinePass::InlineReturn(
     analysis::DebugInlinedAtContext* inlined_at_ctx, Function* calleeFn,
     const Instruction* inst, uint32_t returnVarId) {
   // Store return value to return variable.
-  if (inst->opcode() == SpvOpReturnValue) {
+  if (inst->opcode() == spv::Op::OpReturnValue) {
     assert(returnVarId != 0);
     uint32_t valId = inst->GetInOperand(kSpvReturnValueId).words[0];
     const auto mapItr = callee2caller.find(valId);
@@ -388,7 +406,8 @@ std::unique_ptr<BasicBlock> InlinePass::InlineReturn(
   }
   if (returnLabelId == 0) return new_blk_ptr;
 
-  if (inst->opcode() == SpvOpReturn || inst->opcode() == SpvOpReturnValue)
+  if (inst->opcode() == spv::Op::OpReturn ||
+      inst->opcode() == spv::Op::OpReturnValue)
     AddBranch(returnLabelId, &new_blk_ptr);
   new_blocks->push_back(std::move(new_blk_ptr));
   return MakeUnique<BasicBlock>(NewLabel(returnLabelId));
@@ -405,8 +424,8 @@ bool InlinePass::InlineEntryBlock(
   while (callee_inst_itr != callee_first_block->end()) {
     // Don't inline function definition links, the calling function is not a
     // definition.
-    if (callee_inst_itr->GetShader100DebugOpcode() ==
-        NonSemanticShaderDebugInfo100DebugFunctionDefinition) {
+    if (callee_inst_itr->GetShaderDebugOpcode() ==
+        NonSemanticShaderDebugInfoDebugFunctionDefinition) {
       ++callee_inst_itr;
       continue;
     }
@@ -443,8 +462,8 @@ std::unique_ptr<BasicBlock> InlinePass::InlineBasicBlocks(
          ++inst_itr) {
       // Don't inline function definition links, the calling function is not a
       // definition
-      if (inst_itr->GetShader100DebugOpcode() ==
-          NonSemanticShaderDebugInfo100DebugFunctionDefinition)
+      if (inst_itr->GetShaderDebugOpcode() ==
+          NonSemanticShaderDebugInfoDebugFunctionDefinition)
         continue;
       if (!InlineSingleInstruction(
               callee2caller, new_blk_ptr.get(), &*inst_itr,
@@ -499,7 +518,7 @@ void InlinePass::MoveLoopMergeInstToFirstBlock(
   // Insert a modified copy of the loop merge into the first block.
   auto loop_merge_itr = last->tail();
   --loop_merge_itr;
-  assert(loop_merge_itr->opcode() == SpvOpLoopMerge);
+  assert(loop_merge_itr->opcode() == spv::Op::OpLoopMerge);
   std::unique_ptr<Instruction> cp_inst(loop_merge_itr->Clone(context()));
   first->tail().InsertBefore(std::move(cp_inst));
 
@@ -696,7 +715,7 @@ bool InlinePass::GenInlineCode(
 }
 
 bool InlinePass::IsInlinableFunctionCall(const Instruction* inst) {
-  if (inst->opcode() != SpvOp::SpvOpFunctionCall) return false;
+  if (inst->opcode() != spv::Op::OpFunctionCall) return false;
   const uint32_t calleeFnId =
       inst->GetSingleWordOperand(kSpvFunctionCallFunctionId);
   const auto ci = inlinable_.find(calleeFnId);
@@ -738,7 +757,7 @@ void InlinePass::UpdateSucceedingPhis(
 bool InlinePass::HasNoReturnInLoop(Function* func) {
   // If control not structured, do not do loop/return analysis
   // TODO: Analyze returns in non-structured control flow
-  if (!context()->get_feature_mgr()->HasCapability(SpvCapabilityShader))
+  if (!context()->get_feature_mgr()->HasCapability(spv::Capability::Shader))
     return false;
   const auto structured_analysis = context()->GetStructuredCFGAnalysis();
   // Search for returns in structured construct.
@@ -776,7 +795,7 @@ bool InlinePass::IsInlinableFunction(Function* func) {
   if (func->cbegin() == func->cend()) return false;
 
   // Do not inline functions with DontInline flag.
-  if (func->control_mask() & SpvFunctionControlDontInlineMask) {
+  if (func->control_mask() & uint32_t(spv::FunctionControlMask::DontInline)) {
     return false;
   }
 
@@ -794,22 +813,25 @@ bool InlinePass::IsInlinableFunction(Function* func) {
     return false;
   }
 
-  // Do not inline functions with an OpKill if they are called from a continue
-  // construct. If it is inlined into a continue construct it will generate
-  // invalid code.
+  // Do not inline functions with an abort instruction if they are called from a
+  // continue construct. If it is inlined into a continue construct the backedge
+  // will no longer post-dominate the continue target, which is invalid.  An
+  // `OpUnreachable` is acceptable because it will not change post-dominance if
+  // it is statically unreachable.
   bool func_is_called_from_continue =
       funcs_called_from_continue_.count(func->result_id()) != 0;
 
-  if (func_is_called_from_continue && ContainsKillOrTerminateInvocation(func)) {
+  if (func_is_called_from_continue && ContainsAbortOtherThanUnreachable(func)) {
     return false;
   }
 
   return true;
 }
 
-bool InlinePass::ContainsKillOrTerminateInvocation(Function* func) const {
+bool InlinePass::ContainsAbortOtherThanUnreachable(Function* func) const {
   return !func->WhileEachInst([](Instruction* inst) {
-    return !spvOpcodeTerminatesExecution(inst->opcode());
+    return inst->opcode() == spv::Op::OpUnreachable ||
+           !spvOpcodeIsAbort(inst->opcode());
   });
 }
 
@@ -837,6 +859,93 @@ void InlinePass::InitializeInline() {
 }
 
 InlinePass::InlinePass() {}
+
+void InlinePass::FixDebugDeclares(Function* func) {
+  std::map<uint32_t, Instruction*> access_chains;
+  std::vector<Instruction*> debug_declare_insts;
+
+  func->ForEachInst([&access_chains, &debug_declare_insts](Instruction* inst) {
+    if (inst->opcode() == spv::Op::OpAccessChain) {
+      access_chains[inst->result_id()] = inst;
+    }
+    if (inst->GetCommonDebugOpcode() == CommonDebugInfoDebugDeclare) {
+      debug_declare_insts.push_back(inst);
+    }
+  });
+
+  for (auto& inst : debug_declare_insts) {
+    FixDebugDeclare(inst, access_chains);
+  }
+}
+
+void InlinePass::FixDebugDeclare(
+    Instruction* dbg_declare_inst,
+    const std::map<uint32_t, Instruction*>& access_chains) {
+  do {
+    uint32_t var_id =
+        dbg_declare_inst->GetSingleWordInOperand(kSpvDebugDeclareVarInIdx);
+
+    // The def-use chains are not kept up to date while inlining, so we need to
+    // get the variable by traversing the functions.
+    auto it = access_chains.find(var_id);
+    if (it == access_chains.end()) {
+      return;
+    }
+    Instruction* access_chain = it->second;
+
+    // If the variable id in the debug declare is an access chain, it is
+    // invalid. it needs to be fixed up. The debug declare will be updated so
+    // that its Var operand becomes the base of the access chain. The indexes of
+    // the access chain are prepended before the indexes of the debug declare.
+
+    // DebugDeclare Indexes must be constant integers. If any access chain
+    // index is non-constant (e.g. the result of an OpLoad), we cannot
+    // produce a valid DebugDeclare. Kill it rather than emit invalid SPIR-V.
+    bool has_non_constant_index = false;
+    for (uint32_t i = kSpvAccessChainBaseInIdx + 1;
+         i < access_chain->NumInOperands(); ++i) {
+      uint32_t idx_id = access_chain->GetSingleWordInOperand(i);
+      bool found_constant = false;
+      for (auto& inst : context()->module()->types_values()) {
+        if (inst.result_id() == idx_id) {
+          found_constant = spvOpcodeIsConstant(inst.opcode());
+          break;
+        }
+      }
+      if (!found_constant) {
+        has_non_constant_index = true;
+        break;
+      }
+    }
+    if (has_non_constant_index) {
+      context()->KillInst(dbg_declare_inst);
+      return;
+    }
+
+    std::vector<Operand> operands;
+    for (int i = 0; i < kSpvDebugDeclareVarInIdx; i++) {
+      operands.push_back(dbg_declare_inst->GetInOperand(i));
+    }
+
+    uint32_t access_chain_base =
+        access_chain->GetSingleWordInOperand(kSpvAccessChainBaseInIdx);
+    operands.push_back(Operand(SPV_OPERAND_TYPE_ID, {access_chain_base}));
+    operands.push_back(
+        dbg_declare_inst->GetInOperand(kSpvDebugDeclareVarInIdx + 1));
+
+    for (uint32_t i = kSpvAccessChainBaseInIdx + 1;
+         i < access_chain->NumInOperands(); ++i) {
+      operands.push_back(access_chain->GetInOperand(i));
+    }
+
+    for (uint32_t i = kSpvDebugDeclareVarInIdx + 2;
+         i < dbg_declare_inst->NumInOperands(); ++i) {
+      operands.push_back(dbg_declare_inst->GetInOperand(i));
+    }
+
+    dbg_declare_inst->SetInOperands(std::move(operands));
+  } while (true);
+}
 
 }  // namespace opt
 }  // namespace spvtools

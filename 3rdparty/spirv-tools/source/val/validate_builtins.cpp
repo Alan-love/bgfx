@@ -1,6 +1,7 @@
 // Copyright (c) 2018 Google LLC.
 // Modifications Copyright (C) 2020 Advanced Micro Devices, Inc. All rights
 // reserved.
+// Copyright (C) 2026 Qualcomm Technologies, Inc.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -17,23 +18,22 @@
 // Validates correctness of built-in variables.
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <list>
 #include <map>
 #include <set>
 #include <sstream>
-#include <stack>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-#include "source/diagnostic.h"
 #include "source/opcode.h"
 #include "source/spirv_target_env.h"
-#include "source/util/bitutils.h"
 #include "source/val/instruction.h"
 #include "source/val/validate.h"
 #include "source/val/validation_state.h"
+#include "spirv/unified1/spirv.hpp11"
 
 namespace spvtools {
 namespace val {
@@ -62,7 +62,7 @@ spv_result_t GetUnderlyingType(ValidationState_t& _,
                                const Instruction& inst,
                                uint32_t* underlying_type) {
   if (decoration.struct_member_index() != Decoration::kInvalidMember) {
-    if (inst.opcode() != SpvOpTypeStruct) {
+    if (inst.opcode() != spv::Op::OpTypeStruct) {
       return _.diag(SPV_ERROR_INVALID_DATA, &inst)
              << GetIdDesc(inst)
              << "Attempted to get underlying data type via member index for "
@@ -72,7 +72,7 @@ spv_result_t GetUnderlyingType(ValidationState_t& _,
     return SPV_SUCCESS;
   }
 
-  if (inst.opcode() == SpvOpTypeStruct) {
+  if (inst.opcode() == spv::Op::OpTypeStruct) {
     return _.diag(SPV_ERROR_INVALID_DATA, &inst)
            << GetIdDesc(inst)
            << " did not find an member index to get underlying data type for "
@@ -84,7 +84,7 @@ spv_result_t GetUnderlyingType(ValidationState_t& _,
     return SPV_SUCCESS;
   }
 
-  uint32_t storage_class = 0;
+  spv::StorageClass storage_class;
   if (!_.GetPointerTypeInfo(inst.type_id(), underlying_type, &storage_class)) {
     return _.diag(SPV_ERROR_INVALID_DATA, &inst)
            << GetIdDesc(inst)
@@ -95,22 +95,26 @@ spv_result_t GetUnderlyingType(ValidationState_t& _,
 }
 
 // Returns Storage Class used by the instruction if applicable.
-// Returns SpvStorageClassMax if not.
-SpvStorageClass GetStorageClass(const Instruction& inst) {
+// Returns spv::StorageClass::Max if not.
+spv::StorageClass GetStorageClass(const Instruction& inst) {
   switch (inst.opcode()) {
-    case SpvOpTypePointer:
-    case SpvOpTypeForwardPointer: {
-      return SpvStorageClass(inst.word(2));
+    case spv::Op::OpTypePointer:
+    case spv::Op::OpTypeUntypedPointerKHR:
+    case spv::Op::OpTypeForwardPointer: {
+      return spv::StorageClass(inst.word(2));
     }
-    case SpvOpVariable: {
-      return SpvStorageClass(inst.word(3));
+    case spv::Op::OpVariable: {
+      return spv::StorageClass(inst.word(3));
     }
-    case SpvOpGenericCastToPtrExplicit: {
-      return SpvStorageClass(inst.word(4));
+    case spv::Op::OpUntypedVariableKHR: {
+      return spv::StorageClass(inst.word(4));
+    }
+    case spv::Op::OpGenericCastToPtrExplicit: {
+      return spv::StorageClass(inst.word(4));
     }
     default: { break; }
   }
-  return SpvStorageClassMax;
+  return spv::StorageClass::Max;
 }
 
 typedef enum VUIDError_ {
@@ -120,55 +124,66 @@ typedef enum VUIDError_ {
   VUIDErrorMax,
 } VUIDError;
 
-const static uint32_t NumVUIDBuiltins = 36;
+const static uint32_t NumVUIDBuiltins = 45;
 
 typedef struct {
-  SpvBuiltIn builtIn;
+  spv::BuiltIn builtIn;
   uint32_t vuid[VUIDErrorMax];  // execution mode, storage class, type VUIDs
 } BuiltinVUIDMapping;
 
+// Many built-ins have the same checks (Storage Class, Type, etc)
+// This table provides a nice LUT for the VUIDs
 std::array<BuiltinVUIDMapping, NumVUIDBuiltins> builtinVUIDInfo = {{
     // clang-format off
-    {SpvBuiltInSubgroupEqMask,            {0,    4370, 4371}},
-    {SpvBuiltInSubgroupGeMask,            {0,    4372, 4373}},
-    {SpvBuiltInSubgroupGtMask,            {0,    4374, 4375}},
-    {SpvBuiltInSubgroupLeMask,            {0,    4376, 4377}},
-    {SpvBuiltInSubgroupLtMask,            {0,    4378, 4379}},
-    {SpvBuiltInSubgroupLocalInvocationId, {0,    4380, 4381}},
-    {SpvBuiltInSubgroupSize,              {0,    4382, 4383}},
-    {SpvBuiltInGlobalInvocationId,        {4236, 4237, 4238}},
-    {SpvBuiltInLocalInvocationId,         {4281, 4282, 4283}},
-    {SpvBuiltInNumWorkgroups,             {4296, 4297, 4298}},
-    {SpvBuiltInNumSubgroups,              {4293, 4294, 4295}},
-    {SpvBuiltInSubgroupId,                {4367, 4368, 4369}},
-    {SpvBuiltInWorkgroupId,               {4422, 4423, 4424}},
-    {SpvBuiltInHitKindKHR,                {4242, 4243, 4244}},
-    {SpvBuiltInHitTNV,                    {4245, 4246, 4247}},
-    {SpvBuiltInInstanceCustomIndexKHR,    {4251, 4252, 4253}},
-    {SpvBuiltInInstanceId,                {4254, 4255, 4256}},
-    {SpvBuiltInRayGeometryIndexKHR,       {4345, 4346, 4347}},
-    {SpvBuiltInObjectRayDirectionKHR,     {4299, 4300, 4301}},
-    {SpvBuiltInObjectRayOriginKHR,        {4302, 4303, 4304}},
-    {SpvBuiltInObjectToWorldKHR,          {4305, 4306, 4307}},
-    {SpvBuiltInWorldToObjectKHR,          {4434, 4435, 4436}},
-    {SpvBuiltInIncomingRayFlagsKHR,       {4248, 4249, 4250}},
-    {SpvBuiltInRayTminKHR,                {4351, 4352, 4353}},
-    {SpvBuiltInRayTmaxKHR,                {4348, 4349, 4350}},
-    {SpvBuiltInWorldRayDirectionKHR,      {4428, 4429, 4430}},
-    {SpvBuiltInWorldRayOriginKHR,         {4431, 4432, 4433}},
-    {SpvBuiltInLaunchIdKHR,               {4266, 4267, 4268}},
-    {SpvBuiltInLaunchSizeKHR,             {4269, 4270, 4271}},
-    {SpvBuiltInFragInvocationCountEXT,    {4217, 4218, 4219}},
-    {SpvBuiltInFragSizeEXT,               {4220, 4221, 4222}},
-    {SpvBuiltInFragStencilRefEXT,         {4223, 4224, 4225}},
-    {SpvBuiltInFullyCoveredEXT,           {4232, 4233, 4234}},
-    {SpvBuiltInCullMaskKHR,               {6735, 6736, 6737}},
-    {SpvBuiltInBaryCoordKHR,              {4154, 4155, 4156}},
-    {SpvBuiltInBaryCoordNoPerspKHR,       {4160, 4161, 4162}},
-    // clang-format off
-} };
+    {spv::BuiltIn::SubgroupEqMask,            {0,    4370, 4371}},
+    {spv::BuiltIn::SubgroupGeMask,            {0,    4372, 4373}},
+    {spv::BuiltIn::SubgroupGtMask,            {0,    4374, 4375}},
+    {spv::BuiltIn::SubgroupLeMask,            {0,    4376, 4377}},
+    {spv::BuiltIn::SubgroupLtMask,            {0,    4378, 4379}},
+    {spv::BuiltIn::SubgroupLocalInvocationId, {0,    4380, 4381}},
+    {spv::BuiltIn::SubgroupSize,              {0,    4382, 4383}},
+    {spv::BuiltIn::GlobalInvocationId,        {4236, 4237, 4238}},
+    {spv::BuiltIn::LocalInvocationId,         {4281, 4282, 4283}},
+    {spv::BuiltIn::NumWorkgroups,             {4296, 4297, 4298}},
+    {spv::BuiltIn::NumSubgroups,              {4293, 4294, 4295}},
+    {spv::BuiltIn::SubgroupId,                {4367, 4368, 4369}},
+    {spv::BuiltIn::WorkgroupId,               {4422, 4423, 4424}},
+    {spv::BuiltIn::HitKindKHR,                {4242, 4243, 4244}},
+    {spv::BuiltIn::HitTNV,                    {4245, 4246, 4247}},
+    {spv::BuiltIn::InstanceCustomIndexKHR,    {4251, 4252, 4253}},
+    {spv::BuiltIn::InstanceId,                {4254, 4255, 4256}},
+    {spv::BuiltIn::RayGeometryIndexKHR,       {4345, 4346, 4347}},
+    {spv::BuiltIn::ObjectRayDirectionKHR,     {4299, 4300, 4301}},
+    {spv::BuiltIn::ObjectRayOriginKHR,        {4302, 4303, 4304}},
+    {spv::BuiltIn::ObjectToWorldKHR,          {4305, 4306, 4307}},
+    {spv::BuiltIn::WorldToObjectKHR,          {4434, 4435, 4436}},
+    {spv::BuiltIn::IncomingRayFlagsKHR,       {4248, 4249, 4250}},
+    {spv::BuiltIn::RayTminKHR,                {4351, 4352, 4353}},
+    {spv::BuiltIn::RayTmaxKHR,                {4348, 4349, 4350}},
+    {spv::BuiltIn::WorldRayDirectionKHR,      {4428, 4429, 4430}},
+    {spv::BuiltIn::WorldRayOriginKHR,         {4431, 4432, 4433}},
+    {spv::BuiltIn::LaunchIdKHR,               {4266, 4267, 4268}},
+    {spv::BuiltIn::LaunchSizeKHR,             {4269, 4270, 4271}},
+    {spv::BuiltIn::FragInvocationCountEXT,    {4217, 4218, 4219}},
+    {spv::BuiltIn::FragSizeEXT,               {4220, 4221, 4222}},
+    {spv::BuiltIn::FragStencilRefEXT,         {4223, 4224, 4225}},
+    {spv::BuiltIn::FullyCoveredEXT,           {4232, 4233, 4234}},
+    {spv::BuiltIn::CullMaskKHR,               {6735, 6736, 6737}},
+    {spv::BuiltIn::BaryCoordKHR,              {4154, 4155, 4156}},
+    {spv::BuiltIn::BaryCoordNoPerspKHR,       {4160, 4161, 4162}},
+    {spv::BuiltIn::LocalInvocationIndex,      {4284, 4285, 4286}},
+    {spv::BuiltIn::PrimitivePointIndicesEXT,  {7041, 7043, 7044}},
+    {spv::BuiltIn::PrimitiveLineIndicesEXT,   {7047, 7049, 7050}},
+    {spv::BuiltIn::PrimitiveTriangleIndicesEXT, {7053, 7055, 7056}},
+    {spv::BuiltIn::CullPrimitiveEXT,          {7034, 7035, 7036}},
+    {spv::BuiltIn::HitTriangleVertexPositionsKHR, {8747, 8748, 8749}},
+    {spv::BuiltIn::TileOffsetQCOM,    {10626, 10627, 10628}},
+    {spv::BuiltIn::TileDimensionQCOM, {10629, 10630, 10631}},
+    {spv::BuiltIn::TileApronSizeQCOM, {10632, 10633, 10634}},
+    // clang-format on
+}};
 
-uint32_t GetVUIDForBuiltin(SpvBuiltIn builtIn, VUIDError type) {
+uint32_t GetVUIDForBuiltin(spv::BuiltIn builtIn, VUIDError type) {
   uint32_t vuid = 0;
   for (const auto& iter: builtinVUIDInfo) {
     if (iter.builtIn == builtIn) {
@@ -180,57 +195,58 @@ uint32_t GetVUIDForBuiltin(SpvBuiltIn builtIn, VUIDError type) {
   return vuid;
 }
 
-bool IsExecutionModelValidForRtBuiltIn(SpvBuiltIn builtin,
-                                       SpvExecutionModel stage) {
+bool IsExecutionModelValidForRtBuiltIn(spv::BuiltIn builtin,
+                                       spv::ExecutionModel stage) {
   switch (builtin) {
-    case SpvBuiltInHitKindKHR:
-    case SpvBuiltInHitTNV:
-      if (stage == SpvExecutionModelAnyHitKHR ||
-          stage == SpvExecutionModelClosestHitKHR) {
+    case spv::BuiltIn::HitKindKHR:
+    case spv::BuiltIn::HitTNV:
+    case spv::BuiltIn::HitTriangleVertexPositionsKHR:
+      if (stage == spv::ExecutionModel::AnyHitKHR ||
+          stage == spv::ExecutionModel::ClosestHitKHR) {
         return true;
       }
       break;
-    case SpvBuiltInInstanceCustomIndexKHR:
-    case SpvBuiltInInstanceId:
-    case SpvBuiltInRayGeometryIndexKHR:
-    case SpvBuiltInObjectRayDirectionKHR:
-    case SpvBuiltInObjectRayOriginKHR:
-    case SpvBuiltInObjectToWorldKHR:
-    case SpvBuiltInWorldToObjectKHR:
+    case spv::BuiltIn::InstanceCustomIndexKHR:
+    case spv::BuiltIn::InstanceId:
+    case spv::BuiltIn::RayGeometryIndexKHR:
+    case spv::BuiltIn::ObjectRayDirectionKHR:
+    case spv::BuiltIn::ObjectRayOriginKHR:
+    case spv::BuiltIn::ObjectToWorldKHR:
+    case spv::BuiltIn::WorldToObjectKHR:
       switch (stage) {
-        case SpvExecutionModelIntersectionKHR:
-        case SpvExecutionModelAnyHitKHR:
-        case SpvExecutionModelClosestHitKHR:
+        case spv::ExecutionModel::IntersectionKHR:
+        case spv::ExecutionModel::AnyHitKHR:
+        case spv::ExecutionModel::ClosestHitKHR:
           return true;
         default:
           return false;
       }
       break;
-    case SpvBuiltInIncomingRayFlagsKHR:
-    case SpvBuiltInRayTminKHR:
-    case SpvBuiltInRayTmaxKHR:
-    case SpvBuiltInWorldRayDirectionKHR:
-    case SpvBuiltInWorldRayOriginKHR:
-    case SpvBuiltInCullMaskKHR:
+    case spv::BuiltIn::IncomingRayFlagsKHR:
+    case spv::BuiltIn::RayTminKHR:
+    case spv::BuiltIn::RayTmaxKHR:
+    case spv::BuiltIn::WorldRayDirectionKHR:
+    case spv::BuiltIn::WorldRayOriginKHR:
+    case spv::BuiltIn::CullMaskKHR:
       switch (stage) {
-        case SpvExecutionModelIntersectionKHR:
-        case SpvExecutionModelAnyHitKHR:
-        case SpvExecutionModelClosestHitKHR:
-        case SpvExecutionModelMissKHR:
+        case spv::ExecutionModel::IntersectionKHR:
+        case spv::ExecutionModel::AnyHitKHR:
+        case spv::ExecutionModel::ClosestHitKHR:
+        case spv::ExecutionModel::MissKHR:
           return true;
         default:
           return false;
       }
       break;
-    case SpvBuiltInLaunchIdKHR:
-    case SpvBuiltInLaunchSizeKHR:
+    case spv::BuiltIn::LaunchIdKHR:
+    case spv::BuiltIn::LaunchSizeKHR:
       switch (stage) {
-        case SpvExecutionModelRayGenerationKHR:
-        case SpvExecutionModelIntersectionKHR:
-        case SpvExecutionModelAnyHitKHR:
-        case SpvExecutionModelClosestHitKHR:
-        case SpvExecutionModelMissKHR:
-        case SpvExecutionModelCallableKHR:
+        case spv::ExecutionModel::RayGenerationKHR:
+        case spv::ExecutionModel::IntersectionKHR:
+        case spv::ExecutionModel::AnyHitKHR:
+        case spv::ExecutionModel::ClosestHitKHR:
+        case spv::ExecutionModel::MissKHR:
+        case spv::ExecutionModel::CallableKHR:
           return true;
         default:
           return false;
@@ -262,6 +278,9 @@ class BuiltInsValidator {
   // specified. Seeds id_to_at_reference_checks_ with decorated ids if needed.
   spv_result_t ValidateSingleBuiltInAtDefinition(const Decoration& decoration,
                                                  const Instruction& inst);
+  spv_result_t ValidateSingleBuiltInAtDefinitionVulkan(
+      const Decoration& decoration, const Instruction& inst,
+      const spv::BuiltIn label);
 
   // The following section contains functions which are called when id defined
   // by |inst| is decorated with BuiltIn |decoration|.
@@ -333,7 +352,7 @@ class BuiltInsValidator {
   // Used for GlobalInvocationId, LocalInvocationId, NumWorkgroups, WorkgroupId.
   spv_result_t ValidateComputeShaderI32Vec3InputAtDefinition(
       const Decoration& decoration, const Instruction& inst);
-  spv_result_t ValidateSMBuiltinsAtDefinition(const Decoration& decoration,
+  spv_result_t ValidateNVSMOrARMCoreBuiltinsAtDefinition(const Decoration& decoration,
                                               const Instruction& inst);
   // Used for BaryCoord, BaryCoordNoPersp.
   spv_result_t ValidateFragmentShaderF32Vec3InputAtDefinition(
@@ -355,8 +374,29 @@ class BuiltInsValidator {
   spv_result_t ValidateShadingRateAtDefinition(const Decoration& decoration,
                                                const Instruction& inst);
 
+  spv_result_t ValidateDescriptorHeapAtDefinition(const Decoration& decoration,
+                                                  const Instruction& inst);
+
   spv_result_t ValidateRayTracingBuiltinsAtDefinition(
       const Decoration& decoration, const Instruction& inst);
+
+  spv_result_t ValidateMeshShadingEXTBuiltinsAtDefinition(
+      const Decoration& decoration, const Instruction& inst);
+
+  spv_result_t ValidateTileQCOMBuiltinAtDefinition(const Decoration& decoration,
+                                                   const Instruction& inst);
+
+  // Used as a common method for validating MeshEXT builtins
+  spv_result_t ValidateMeshBuiltinInterfaceRules(
+      const Decoration& decoration, const Instruction& inst,
+      spv::Op scalar_type, const Instruction& referenced_from_inst);
+  spv_result_t ValidatePrimitiveShadingRateInterfaceRules(
+      const Decoration& decoration, const Instruction& inst,
+      const Instruction& referenced_from_inst);
+  // Builtin that needs check incase **not** used with MeshEXT
+  spv_result_t ValidateNonMeshInterfaceRules(
+      const Decoration& decoration, const Instruction& inst,
+      const Instruction& referenced_from_inst);
 
   // The following section contains functions which are called when id defined
   // by |referenced_inst| is
@@ -528,7 +568,7 @@ class BuiltInsValidator {
       const Instruction& referenced_inst,
       const Instruction& referenced_from_inst);
 
-  spv_result_t ValidateSMBuiltinsAtReference(
+  spv_result_t ValidateNVSMOrARMCoreBuiltinsAtReference(
       const Decoration& decoration, const Instruction& built_in_inst,
       const Instruction& referenced_inst,
       const Instruction& referenced_from_inst);
@@ -548,6 +588,16 @@ class BuiltInsValidator {
       const Instruction& referenced_inst,
       const Instruction& referenced_from_inst);
 
+  spv_result_t ValidateMeshShadingEXTBuiltinsAtReference(
+      const Decoration& decoration, const Instruction& built_in_inst,
+      const Instruction& referenced_inst,
+      const Instruction& referenced_from_inst);
+
+  spv_result_t ValidateTileQCOMBuiltinAtReference(
+      const Decoration& decoration, const Instruction& built_in_inst,
+      const Instruction& referenced_inst,
+      const Instruction& referenced_from_inst);
+
   // Validates that |built_in_inst| is not (even indirectly) referenced from
   // within a function which can be called with |execution_model|.
   //
@@ -559,7 +609,7 @@ class BuiltInsValidator {
   // |referenced_from_inst| - instruction which references id defined by
   //                          |referenced_inst| from within a function.
   spv_result_t ValidateNotCalledWithExecutionModel(
-      int vuid, const char* comment, SpvExecutionModel execution_model,
+      int vuid, const char* comment, spv::ExecutionModel execution_model,
       const Decoration& decoration, const Instruction& built_in_inst,
       const Instruction& referenced_inst,
       const Instruction& referenced_from_inst);
@@ -569,6 +619,10 @@ class BuiltInsValidator {
   // called with a corresponding error message, if validation is not successful.
   spv_result_t ValidateBool(
       const Decoration& decoration, const Instruction& inst,
+      const std::function<spv_result_t(const std::string& message)>& diag);
+  spv_result_t ValidateBlockTypeOrArrayedType(
+      const Decoration& decoration, const Instruction& inst,
+      bool& present_in_block, spv::Op expected_scalar_type,
       const std::function<spv_result_t(const std::string& message)>& diag);
   spv_result_t ValidateI(
       const Decoration& decoration, const Instruction& inst,
@@ -580,8 +634,16 @@ class BuiltInsValidator {
       const Decoration& decoration, const Instruction& inst,
       uint32_t num_components,
       const std::function<spv_result_t(const std::string& message)>& diag);
+  spv_result_t ValidateU32Vec(
+      const Decoration& decoration, const Instruction& inst,
+      uint32_t num_components,
+      const std::function<spv_result_t(const std::string& message)>& diag);
   spv_result_t ValidateI32Arr(
       const Decoration& decoration, const Instruction& inst,
+      const std::function<spv_result_t(const std::string& message)>& diag);
+  spv_result_t ValidateArrayedI32Vec(
+      const Decoration& decoration, const Instruction& inst,
+      uint32_t num_components,
       const std::function<spv_result_t(const std::string& message)>& diag);
   spv_result_t ValidateOptionalArrayedI32(
       const Decoration& decoration, const Instruction& inst,
@@ -607,6 +669,10 @@ class BuiltInsValidator {
   spv_result_t ValidateOptionalArrayedF32Vec(
       const Decoration& decoration, const Instruction& inst,
       uint32_t num_components,
+      const std::function<spv_result_t(const std::string& message)>& diag);
+  spv_result_t ValidateArrayedF32Vec(
+      const Decoration& decoration, const Instruction& inst,
+      uint32_t num_components, uint32_t array_length,
       const std::function<spv_result_t(const std::string& message)>& diag);
   spv_result_t ValidateF32VecHelper(
       const Decoration& decoration, const Instruction& inst,
@@ -642,15 +708,80 @@ class BuiltInsValidator {
       const Decoration& decoration, const Instruction& built_in_inst,
       const Instruction& referenced_inst,
       const Instruction& referenced_from_inst,
-      SpvExecutionModel execution_model = SpvExecutionModelMax) const;
+      spv::ExecutionModel execution_model = spv::ExecutionModel::Max) const;
 
   // Generates strings like "ID <51> (OpTypePointer) uses storage class
   // UniformConstant".
   std::string GetStorageClassDesc(const Instruction& inst) const;
 
+  uint64_t GetArrayLength(uint32_t interface_var_id);
+
   // Updates inner working of the class. Is called sequentially for every
   // instruction.
   void Update(const Instruction& inst);
+
+  bool IsBulitinInEntryPoint(const Instruction& inst, uint32_t entry_point) {
+    auto get_underlying_type_id = [&](const Instruction* ifx_var) {
+      auto pointer_type_inst = _.FindDef(ifx_var->type_id());
+      auto type_inst = _.FindDef(pointer_type_inst->GetOperandAs<uint32_t>(2));
+      while (type_inst->opcode() == spv::Op::OpTypeArray) {
+        type_inst = _.FindDef(type_inst->GetOperandAs<uint32_t>(1));
+      };
+      return type_inst->id();
+    };
+
+    for (const auto& desc : _.entry_point_descriptions(entry_point)) {
+      for (auto interface : desc.interfaces) {
+        if (inst.opcode() == spv::Op::OpTypeStruct) {
+          auto varInst = _.FindDef(interface);
+          if (inst.id() == get_underlying_type_id(varInst)) {
+            return true;
+          }
+        } else if (inst.id() == interface) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Check if "inst" is an interface variable or type of a interface varibale
+  // of any mesh entry point. Populate entry_point_interface_id with all
+  // entry points and interface variables that refer to the "inst"
+  bool IsMeshInterfaceVar(
+      const Instruction& inst,
+      std::map<uint32_t, uint32_t>& entry_point_interface_id) {
+    auto get_underlying_type_id = [&](const Instruction* ifx_var) {
+      auto pointer_type_inst = _.FindDef(ifx_var->type_id());
+      auto type_inst = _.FindDef(pointer_type_inst->GetOperandAs<uint32_t>(2));
+      while (type_inst->opcode() == spv::Op::OpTypeArray) {
+        type_inst = _.FindDef(type_inst->GetOperandAs<uint32_t>(1));
+      };
+      return type_inst->id();
+    };
+
+    for (const uint32_t entry_point : _.entry_points()) {
+      const auto* models = _.GetExecutionModels(entry_point);
+      if (models->find(spv::ExecutionModel::MeshEXT) != models->end() ||
+          models->find(spv::ExecutionModel::MeshNV) != models->end()) {
+        for (const auto& desc : _.entry_point_descriptions(entry_point)) {
+          for (auto interface : desc.interfaces) {
+            if (inst.opcode() == spv::Op::OpTypeStruct) {
+              auto varInst = _.FindDef(interface);
+              if (inst.id() == get_underlying_type_id(varInst)) {
+                entry_point_interface_id[entry_point] = interface;
+                break;
+              }
+            } else if (inst.id() == interface) {
+              entry_point_interface_id[entry_point] = interface;
+              break;
+            }
+          }
+        }
+      }
+    }
+    return !entry_point_interface_id.empty();
+  }
 
   ValidationState_t& _;
 
@@ -671,16 +802,24 @@ class BuiltInsValidator {
   const std::vector<uint32_t>* entry_points_ = &no_entry_points;
 
   // Execution models with which the current function can be called.
-  std::set<SpvExecutionModel> execution_models_;
+  std::set<spv::ExecutionModel> execution_models_;
+
+  // Execution modes with which the current function can be called.
+  std::set<spv::ExecutionMode> execution_modes_;
+
+  // For Builtin that can only be declared once in an entry point, keep track if
+  // the entry point has it already
+  std::set<uint32_t> cull_primitive_entry_points_;
 };
 
 void BuiltInsValidator::Update(const Instruction& inst) {
-  const SpvOp opcode = inst.opcode();
-  if (opcode == SpvOpFunction) {
+  const spv::Op opcode = inst.opcode();
+  if (opcode == spv::Op::OpFunction) {
     // Entering a function.
     assert(function_id_ == 0);
     function_id_ = inst.id();
     execution_models_.clear();
+    execution_modes_.clear();
     entry_points_ = &_.FunctionEntryPoints(function_id_);
     // Collect execution models from all entry points from which the current
     // function can be called.
@@ -688,15 +827,19 @@ void BuiltInsValidator::Update(const Instruction& inst) {
       if (const auto* models = _.GetExecutionModels(entry_point)) {
         execution_models_.insert(models->begin(), models->end());
       }
+      if (const auto* modes = _.GetExecutionModes(entry_point)) {
+        execution_modes_.insert(modes->begin(), modes->end());
+      }
     }
   }
 
-  if (opcode == SpvOpFunctionEnd) {
+  if (opcode == spv::Op::OpFunctionEnd) {
     // Exiting a function.
     assert(function_id_ != 0);
     function_id_ = 0;
     entry_points_ = &no_entry_points;
     execution_models_.clear();
+    execution_modes_.clear();
   }
 }
 
@@ -704,7 +847,7 @@ std::string BuiltInsValidator::GetDefinitionDesc(
     const Decoration& decoration, const Instruction& inst) const {
   std::ostringstream ss;
   if (decoration.struct_member_index() != Decoration::kInvalidMember) {
-    assert(inst.opcode() == SpvOpTypeStruct);
+    assert(inst.opcode() == spv::Op::OpTypeStruct);
     ss << "Member #" << decoration.struct_member_index();
     ss << " of struct ID <" << inst.id() << ">";
   } else {
@@ -716,7 +859,7 @@ std::string BuiltInsValidator::GetDefinitionDesc(
 std::string BuiltInsValidator::GetReferenceDesc(
     const Decoration& decoration, const Instruction& built_in_inst,
     const Instruction& referenced_inst, const Instruction& referenced_from_inst,
-    SpvExecutionModel execution_model) const {
+    spv::ExecutionModel execution_model) const {
   std::ostringstream ss;
   ss << GetIdDesc(referenced_from_inst) << " is referencing "
      << GetIdDesc(referenced_inst);
@@ -726,13 +869,13 @@ std::string BuiltInsValidator::GetReferenceDesc(
 
   ss << " which is decorated with BuiltIn ";
   ss << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                      decoration.params()[0]);
+                                      (uint32_t)decoration.builtin());
   if (function_id_) {
     ss << " in function <" << function_id_ << ">";
-    if (execution_model != SpvExecutionModelMax) {
+    if (execution_model != spv::ExecutionModel::Max) {
       ss << " called with execution model ";
       ss << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_EXECUTION_MODEL,
-                                          execution_model);
+                                          uint32_t(execution_model));
     }
   }
   ss << ".";
@@ -744,9 +887,32 @@ std::string BuiltInsValidator::GetStorageClassDesc(
   std::ostringstream ss;
   ss << GetIdDesc(inst) << " uses storage class ";
   ss << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_STORAGE_CLASS,
-                                      GetStorageClass(inst));
+                                      uint32_t(GetStorageClass(inst)));
   ss << ".";
   return ss.str();
+}
+
+uint64_t BuiltInsValidator::GetArrayLength(uint32_t interface_var_id) {
+  uint32_t underlying_type;
+  spv::StorageClass storage_class;
+  uint64_t array_len = -1;
+  const Instruction* inst = _.FindDef(interface_var_id);
+  if (inst->opcode() != spv::Op::OpVariable) {
+    return -1;
+  }
+
+  if (!_.GetPointerTypeInfo(inst->type_id(), &underlying_type,
+                            &storage_class)) {
+    return 0;
+  }
+  if (_.GetIdOpcode(underlying_type) == spv::Op::OpTypeArray) {
+    // Get the array length
+    const auto length_id = _.FindDef(underlying_type)->word(3u);
+    if (!_.EvalConstantValUint64(length_id, &array_len)) {
+      return 0;
+    }
+  }
+  return array_len;
 }
 
 spv_result_t BuiltInsValidator::ValidateBool(
@@ -760,6 +926,55 @@ spv_result_t BuiltInsValidator::ValidateBool(
 
   if (!_.IsBoolScalarType(underlying_type)) {
     return diag(GetDefinitionDesc(decoration, inst) + " is not a bool scalar.");
+  }
+
+  return SPV_SUCCESS;
+}
+
+spv_result_t BuiltInsValidator::ValidateBlockTypeOrArrayedType(
+    const Decoration& decoration, const Instruction& inst, bool& isBlock,
+    spv::Op expected_scalar_type,
+    const std::function<spv_result_t(const std::string& message)>& diag) {
+  uint32_t underlying_type = 0;
+  int64_t array_len = -1;
+  isBlock = true;
+  if (spv_result_t error =
+          GetUnderlyingType(_, decoration, inst, &underlying_type)) {
+    return error;
+  }
+  // Strip the array, if present.
+  if (_.GetIdOpcode(underlying_type) == spv::Op::OpTypeArray) {
+    // Get the array length
+    const auto length_id = _.FindDef(underlying_type)->word(3u);
+    if (!_.EvalConstantValInt64(length_id, &array_len)) {
+      return diag(GetDefinitionDesc(decoration, inst) +
+                  " Failed to find the array length.");
+    }
+    underlying_type = _.FindDef(underlying_type)->word(2u);
+    isBlock = false;
+  } else if (!_.HasDecoration(inst.id(), spv::Decoration::Block)) {
+    // If not in array, and bool is in a struct, must be in a Block struct
+    return diag(GetDefinitionDesc(decoration, inst) +
+                " Scalar boolean must be in a Block.");
+  }
+
+  switch (expected_scalar_type) {
+    case spv::Op::OpTypeBool:
+      if (!_.IsBoolScalarType(underlying_type)) {
+        return diag(GetDefinitionDesc(decoration, inst) +
+                    " is not a bool scalar.");
+      }
+      break;
+    case spv::Op::OpTypeInt:
+      if (!_.IsIntScalarType(underlying_type)) {
+        return diag(GetDefinitionDesc(decoration, inst) +
+                    " is not an integer scalar.");
+      }
+      break;
+    default:
+      assert(0 && "Unhandled scalar type");
+      return diag(GetDefinitionDesc(decoration, inst) +
+                  " is not a recognized scalar type.");
   }
 
   return SPV_SUCCESS;
@@ -803,7 +1018,7 @@ spv_result_t BuiltInsValidator::ValidateOptionalArrayedI32(
   }
 
   // Strip the array, if present.
-  if (_.GetIdOpcode(underlying_type) == SpvOpTypeArray) {
+  if (_.GetIdOpcode(underlying_type) == spv::Op::OpTypeArray) {
     underlying_type = _.FindDef(underlying_type)->word(2u);
   }
 
@@ -839,7 +1054,7 @@ spv_result_t BuiltInsValidator::ValidateOptionalArrayedF32(
   }
 
   // Strip the array, if present.
-  if (_.GetIdOpcode(underlying_type) == SpvOpTypeArray) {
+  if (_.GetIdOpcode(underlying_type) == spv::Op::OpTypeArray) {
     underlying_type = _.FindDef(underlying_type)->word(2u);
   }
 
@@ -911,6 +1126,79 @@ spv_result_t BuiltInsValidator::ValidateI32Vec(
   return SPV_SUCCESS;
 }
 
+spv_result_t BuiltInsValidator::ValidateU32Vec(
+    const Decoration& decoration, const Instruction& inst,
+    uint32_t num_components,
+    const std::function<spv_result_t(const std::string& message)>& diag) {
+  uint32_t underlying_type = 0;
+  if (spv_result_t error =
+          GetUnderlyingType(_, decoration, inst, &underlying_type)) {
+    return error;
+  }
+
+  if (!_.IsUnsignedIntVectorType(underlying_type)) {
+    return diag(GetDefinitionDesc(decoration, inst) +
+                " is not an unsigned int vector.");
+  }
+
+  const uint32_t actual = _.GetDimension(underlying_type);
+  if (actual != num_components) {
+    std::ostringstream ss;
+    ss << GetDefinitionDesc(decoration, inst) << " has " << actual
+       << " components.";
+    return diag(ss.str());
+  }
+
+  const uint32_t bit_width = _.GetBitWidth(underlying_type);
+  if (bit_width != 32) {
+    std::ostringstream ss;
+    ss << GetDefinitionDesc(decoration, inst)
+       << " has components with bit width " << bit_width << ".";
+    return diag(ss.str());
+  }
+
+  return SPV_SUCCESS;
+}
+
+spv_result_t BuiltInsValidator::ValidateArrayedI32Vec(
+    const Decoration& decoration, const Instruction& inst,
+    uint32_t num_components,
+    const std::function<spv_result_t(const std::string& message)>& diag) {
+  uint32_t underlying_type = 0;
+  if (spv_result_t error =
+          GetUnderlyingType(_, decoration, inst, &underlying_type)) {
+    return error;
+  }
+
+  const Instruction* const type_inst = _.FindDef(underlying_type);
+  if (type_inst->opcode() != spv::Op::OpTypeArray) {
+    return diag(GetDefinitionDesc(decoration, inst) + " is not an array.");
+  }
+
+  const uint32_t component_type = type_inst->word(2);
+  if (!_.IsIntVectorType(component_type)) {
+    return diag(GetDefinitionDesc(decoration, inst) + " is not an int vector.");
+  }
+
+  const uint32_t actual_num_components = _.GetDimension(component_type);
+  if (_.GetDimension(component_type) != num_components) {
+    std::ostringstream ss;
+    ss << GetDefinitionDesc(decoration, inst) << " has "
+       << actual_num_components << " components.";
+    return diag(ss.str());
+  }
+
+  const uint32_t bit_width = _.GetBitWidth(component_type);
+  if (bit_width != 32) {
+    std::ostringstream ss;
+    ss << GetDefinitionDesc(decoration, inst)
+       << " has components with bit width " << bit_width << ".";
+    return diag(ss.str());
+  }
+
+  return SPV_SUCCESS;
+}
+
 spv_result_t BuiltInsValidator::ValidateOptionalArrayedF32Vec(
     const Decoration& decoration, const Instruction& inst,
     uint32_t num_components,
@@ -922,9 +1210,41 @@ spv_result_t BuiltInsValidator::ValidateOptionalArrayedF32Vec(
   }
 
   // Strip the array, if present.
-  if (_.GetIdOpcode(underlying_type) == SpvOpTypeArray) {
+  if (_.GetIdOpcode(underlying_type) == spv::Op::OpTypeArray) {
     underlying_type = _.FindDef(underlying_type)->word(2u);
   }
+
+  return ValidateF32VecHelper(decoration, inst, num_components, diag,
+                              underlying_type);
+}
+
+spv_result_t BuiltInsValidator::ValidateArrayedF32Vec(
+    const Decoration& decoration, const Instruction& inst,
+    uint32_t num_components, uint32_t array_length,
+    const std::function<spv_result_t(const std::string& message)>& diag) {
+  uint32_t underlying_type = 0;
+  if (spv_result_t error =
+          GetUnderlyingType(_, decoration, inst, &underlying_type)) {
+    return error;
+  }
+
+  if (_.GetIdOpcode(underlying_type) != spv::Op::OpTypeArray) {
+    return diag(GetDefinitionDesc(decoration, inst) + " is not an array.");
+  }
+
+  const uint32_t length_id = _.FindDef(underlying_type)->word(3u);
+  uint64_t found_length = 0;
+  if (!_.EvalConstantValUint64(length_id, &found_length)) {
+    return diag(GetDefinitionDesc(decoration, inst) +
+                " array has a non constant length.");
+  }
+
+  if (array_length != found_length) {
+    return diag(GetDefinitionDesc(decoration, inst) + " array length must be " +
+                std::to_string(array_length));
+  }
+
+  underlying_type = _.FindDef(underlying_type)->word(2u);
 
   return ValidateF32VecHelper(decoration, inst, num_components, diag,
                               underlying_type);
@@ -983,7 +1303,7 @@ spv_result_t BuiltInsValidator::ValidateI32Arr(
   }
 
   const Instruction* const type_inst = _.FindDef(underlying_type);
-  if (type_inst->opcode() != SpvOpTypeArray) {
+  if (type_inst->opcode() != spv::Op::OpTypeArray) {
     return diag(GetDefinitionDesc(decoration, inst) + " is not an array.");
   }
 
@@ -1029,9 +1349,9 @@ spv_result_t BuiltInsValidator::ValidateOptionalArrayedF32Arr(
   }
 
   // Strip an extra layer of arraying if present.
-  if (_.GetIdOpcode(underlying_type) == SpvOpTypeArray) {
+  if (_.GetIdOpcode(underlying_type) == spv::Op::OpTypeArray) {
     uint32_t subtype = _.FindDef(underlying_type)->word(2u);
-    if (_.GetIdOpcode(subtype) == SpvOpTypeArray) {
+    if (_.GetIdOpcode(subtype) == spv::Op::OpTypeArray) {
       underlying_type = subtype;
     }
   }
@@ -1046,7 +1366,7 @@ spv_result_t BuiltInsValidator::ValidateF32ArrHelper(
     const std::function<spv_result_t(const std::string& message)>& diag,
     uint32_t underlying_type) {
   const Instruction* const type_inst = _.FindDef(underlying_type);
-  if (type_inst->opcode() != SpvOpTypeArray) {
+  if (type_inst->opcode() != spv::Op::OpTypeArray) {
     return diag(GetDefinitionDesc(decoration, inst) + " is not an array.");
   }
 
@@ -1066,7 +1386,7 @@ spv_result_t BuiltInsValidator::ValidateF32ArrHelper(
 
   if (num_components != 0) {
     uint64_t actual_num_components = 0;
-    if (!_.GetConstantValUint64(type_inst->word(3), &actual_num_components)) {
+    if (!_.EvalConstantValUint64(type_inst->word(3), &actual_num_components)) {
       assert(0 && "Array type definition is corrupt");
     }
     if (actual_num_components != num_components) {
@@ -1107,16 +1427,16 @@ spv_result_t BuiltInsValidator::ValidateF32Mat(
 }
 
 spv_result_t BuiltInsValidator::ValidateNotCalledWithExecutionModel(
-    int vuid, const char* comment, SpvExecutionModel execution_model,
+    int vuid, const char* comment, spv::ExecutionModel execution_model,
     const Decoration& decoration, const Instruction& built_in_inst,
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (function_id_) {
     if (execution_models_.count(execution_model)) {
       const char* execution_model_str = _.grammar().lookupOperandName(
-          SPV_OPERAND_TYPE_EXECUTION_MODEL, execution_model);
+          SPV_OPERAND_TYPE_EXECUTION_MODEL, uint32_t(execution_model));
       const char* built_in_str = _.grammar().lookupOperandName(
-          SPV_OPERAND_TYPE_BUILT_IN, decoration.params()[0]);
+          SPV_OPERAND_TYPE_BUILT_IN, (uint32_t)decoration.builtin());
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << (vuid < 0 ? std::string("") : _.VkErrorID(vuid)) << comment
              << " " << GetIdDesc(referenced_inst) << " depends on "
@@ -1147,13 +1467,14 @@ spv_result_t BuiltInsValidator::ValidateClipOrCullDistanceAtReference(
     const Decoration& decoration, const Instruction& built_in_inst,
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
-  uint32_t operand = decoration.params()[0];
+  uint32_t operand = (uint32_t)decoration.builtin();
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput &&
-        storage_class != SpvStorageClassOutput) {
-      uint32_t vuid = (decoration.params()[0] == SpvBuiltInClipDistance) ? 4190 : 4199;
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input &&
+        storage_class != spv::StorageClass::Output) {
+      uint32_t vuid =
+          (decoration.builtin() == spv::BuiltIn::ClipDistance) ? 4190 : 4199;
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(vuid) << "Vulkan spec allows BuiltIn "
              << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -1165,47 +1486,56 @@ spv_result_t BuiltInsValidator::ValidateClipOrCullDistanceAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    if (storage_class == SpvStorageClassInput) {
+    if (storage_class == spv::StorageClass::Input) {
       assert(function_id_ == 0);
-      uint32_t vuid = (decoration.params()[0] == SpvBuiltInClipDistance) ? 4188 : 4197;
+      uint32_t vuid =
+          (decoration.builtin() == spv::BuiltIn::ClipDistance) ? 4188 : 4197;
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, vuid,
           "Vulkan spec doesn't allow BuiltIn ClipDistance/CullDistance to be "
           "used for variables with Input storage class if execution model is "
           "Vertex.",
-          SpvExecutionModelVertex, decoration, built_in_inst,
+          spv::ExecutionModel::Vertex, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, vuid,
           "Vulkan spec doesn't allow BuiltIn ClipDistance/CullDistance to be "
           "used for variables with Input storage class if execution model is "
-          "Vertex.",
-          SpvExecutionModelMeshNV, decoration, built_in_inst,
+          "MeshNV.",
+          spv::ExecutionModel::MeshNV, decoration, built_in_inst,
+          referenced_from_inst, std::placeholders::_1));
+      id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
+          &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, vuid,
+          "Vulkan spec doesn't allow BuiltIn ClipDistance/CullDistance to be "
+          "used for variables with Input storage class if execution model is "
+          "MeshEXT.",
+          spv::ExecutionModel::MeshEXT, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
     }
 
-    if (storage_class == SpvStorageClassOutput) {
+    if (storage_class == spv::StorageClass::Output) {
       assert(function_id_ == 0);
-      uint32_t vuid = (decoration.params()[0] == SpvBuiltInClipDistance) ? 4189 : 4198;
+      uint32_t vuid =
+          (decoration.builtin() == spv::BuiltIn::ClipDistance) ? 4189 : 4198;
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, vuid,
           "Vulkan spec doesn't allow BuiltIn ClipDistance/CullDistance to be "
           "used for variables with Output storage class if execution model is "
           "Fragment.",
-          SpvExecutionModelFragment, decoration, built_in_inst,
+          spv::ExecutionModel::Fragment, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
       switch (execution_model) {
-        case SpvExecutionModelFragment:
-        case SpvExecutionModelVertex: {
+        case spv::ExecutionModel::Fragment:
+        case spv::ExecutionModel::Vertex: {
           if (spv_result_t error = ValidateF32Arr(
                   decoration, built_in_inst, /* Any number of components */ 0,
                   [this, &decoration, &referenced_from_inst](
                       const std::string& message) -> spv_result_t {
                     uint32_t vuid =
-                        (decoration.params()[0] == SpvBuiltInClipDistance)
+                        (decoration.builtin() == spv::BuiltIn::ClipDistance)
                             ? 4191
                             : 4200;
                     return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
@@ -1213,7 +1543,7 @@ spv_result_t BuiltInsValidator::ValidateClipOrCullDistanceAtReference(
                            << "According to the Vulkan spec BuiltIn "
                            << _.grammar().lookupOperandName(
                                   SPV_OPERAND_TYPE_BUILT_IN,
-                                  decoration.params()[0])
+                                  (uint32_t)decoration.builtin())
                            << " variable needs to be a 32-bit float array. "
                            << message;
                   })) {
@@ -1221,10 +1551,11 @@ spv_result_t BuiltInsValidator::ValidateClipOrCullDistanceAtReference(
           }
           break;
         }
-        case SpvExecutionModelTessellationControl:
-        case SpvExecutionModelTessellationEvaluation:
-        case SpvExecutionModelGeometry:
-        case SpvExecutionModelMeshNV: {
+        case spv::ExecutionModel::TessellationControl:
+        case spv::ExecutionModel::TessellationEvaluation:
+        case spv::ExecutionModel::Geometry:
+        case spv::ExecutionModel::MeshNV:
+        case spv::ExecutionModel::MeshEXT: {
           if (decoration.struct_member_index() != Decoration::kInvalidMember) {
             // The outer level of array is applied on the variable.
             if (spv_result_t error = ValidateF32Arr(
@@ -1232,7 +1563,7 @@ spv_result_t BuiltInsValidator::ValidateClipOrCullDistanceAtReference(
                     [this, &decoration, &referenced_from_inst](
                         const std::string& message) -> spv_result_t {
                       uint32_t vuid =
-                          (decoration.params()[0] == SpvBuiltInClipDistance)
+                          (decoration.builtin() == spv::BuiltIn::ClipDistance)
                               ? 4191
                               : 4200;
                       return _.diag(SPV_ERROR_INVALID_DATA,
@@ -1241,7 +1572,7 @@ spv_result_t BuiltInsValidator::ValidateClipOrCullDistanceAtReference(
                              << "According to the Vulkan spec BuiltIn "
                              << _.grammar().lookupOperandName(
                                     SPV_OPERAND_TYPE_BUILT_IN,
-                                    decoration.params()[0])
+                                    (uint32_t)decoration.builtin())
                              << " variable needs to be a 32-bit float array. "
                              << message;
                     })) {
@@ -1253,7 +1584,7 @@ spv_result_t BuiltInsValidator::ValidateClipOrCullDistanceAtReference(
                     [this, &decoration, &referenced_from_inst](
                         const std::string& message) -> spv_result_t {
                       uint32_t vuid =
-                          (decoration.params()[0] == SpvBuiltInClipDistance)
+                          (decoration.builtin() == spv::BuiltIn::ClipDistance)
                               ? 4191
                               : 4200;
                       return _.diag(SPV_ERROR_INVALID_DATA,
@@ -1262,7 +1593,7 @@ spv_result_t BuiltInsValidator::ValidateClipOrCullDistanceAtReference(
                              << "According to the Vulkan spec BuiltIn "
                              << _.grammar().lookupOperandName(
                                     SPV_OPERAND_TYPE_BUILT_IN,
-                                    decoration.params()[0])
+                                    (uint32_t)decoration.builtin())
                              << " variable needs to be a 32-bit float array. "
                              << message;
                     })) {
@@ -1273,8 +1604,9 @@ spv_result_t BuiltInsValidator::ValidateClipOrCullDistanceAtReference(
         }
 
         default: {
-          uint32_t vuid =
-              (decoration.params()[0] == SpvBuiltInClipDistance) ? 4187 : 4196;
+          uint32_t vuid = (decoration.builtin() == spv::BuiltIn::ClipDistance)
+                              ? 4187
+                              : 4196;
           return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                  << _.VkErrorID(vuid) << "Vulkan spec allows BuiltIn "
                  << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -1327,9 +1659,9 @@ spv_result_t BuiltInsValidator::ValidateFragCoordAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4211) << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn FragCoord to be only used for "
@@ -1339,8 +1671,8 @@ spv_result_t BuiltInsValidator::ValidateFragCoordAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4210)
                << spvLogStringForEnv(_.context()->target_env)
@@ -1388,9 +1720,9 @@ spv_result_t BuiltInsValidator::ValidateFragDepthAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassOutput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Output) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4214) << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn FragDepth to be only used for "
@@ -1400,8 +1732,8 @@ spv_result_t BuiltInsValidator::ValidateFragDepthAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4213)
                << spvLogStringForEnv(_.context()->target_env)
@@ -1416,7 +1748,7 @@ spv_result_t BuiltInsValidator::ValidateFragDepthAtReference(
       // Every entry point from which this function is called needs to have
       // Execution Mode DepthReplacing.
       const auto* modes = _.GetExecutionModes(entry_point);
-      if (!modes || !modes->count(SpvExecutionModeDepthReplacing)) {
+      if (!modes || !modes->count(spv::ExecutionMode::DepthReplacing)) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4216)
                << spvLogStringForEnv(_.context()->target_env)
@@ -1464,9 +1796,9 @@ spv_result_t BuiltInsValidator::ValidateFrontFacingAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4230) << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn FrontFacing to be only used for "
@@ -1476,8 +1808,8 @@ spv_result_t BuiltInsValidator::ValidateFrontFacingAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4229)
                << spvLogStringForEnv(_.context()->target_env)
@@ -1524,9 +1856,9 @@ spv_result_t BuiltInsValidator::ValidateHelperInvocationAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4240)
              << "Vulkan spec allows BuiltIn HelperInvocation to be only used "
@@ -1536,8 +1868,8 @@ spv_result_t BuiltInsValidator::ValidateHelperInvocationAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4239)
                << "Vulkan spec allows BuiltIn HelperInvocation to be used only "
@@ -1584,9 +1916,9 @@ spv_result_t BuiltInsValidator::ValidateInvocationIdAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4258)
              << "Vulkan spec allows BuiltIn InvocationId to be only used for "
@@ -1596,9 +1928,9 @@ spv_result_t BuiltInsValidator::ValidateInvocationIdAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelTessellationControl &&
-          execution_model != SpvExecutionModelGeometry) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::TessellationControl &&
+          execution_model != spv::ExecutionModel::Geometry) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4257)
                << "Vulkan spec allows BuiltIn InvocationId to be used only "
@@ -1645,9 +1977,9 @@ spv_result_t BuiltInsValidator::ValidateInstanceIndexAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4264) << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn InstanceIndex to be only used for "
@@ -1657,8 +1989,8 @@ spv_result_t BuiltInsValidator::ValidateInstanceIndexAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelVertex) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Vertex) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4263)
                << spvLogStringForEnv(_.context()->target_env)
@@ -1705,9 +2037,9 @@ spv_result_t BuiltInsValidator::ValidatePatchVerticesAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4309)
              << "Vulkan spec allows BuiltIn PatchVertices to be only used for "
@@ -1717,9 +2049,9 @@ spv_result_t BuiltInsValidator::ValidatePatchVerticesAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelTessellationControl &&
-          execution_model != SpvExecutionModelTessellationEvaluation) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::TessellationControl &&
+          execution_model != spv::ExecutionModel::TessellationEvaluation) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4308)
                << "Vulkan spec allows BuiltIn PatchVertices to be used only "
@@ -1767,9 +2099,9 @@ spv_result_t BuiltInsValidator::ValidatePointCoordAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4312)
              << "Vulkan spec allows BuiltIn PointCoord to be only used for "
@@ -1779,8 +2111,8 @@ spv_result_t BuiltInsValidator::ValidatePointCoordAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4311)
                << "Vulkan spec allows BuiltIn PointCoord to be used only with "
@@ -1812,10 +2144,10 @@ spv_result_t BuiltInsValidator::ValidatePointSizeAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput &&
-        storage_class != SpvStorageClassOutput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input &&
+        storage_class != spv::StorageClass::Output) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4316)
              << "Vulkan spec allows BuiltIn PointSize to be only used for "
@@ -1825,20 +2157,20 @@ spv_result_t BuiltInsValidator::ValidatePointSizeAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    if (storage_class == SpvStorageClassInput) {
+    if (storage_class == spv::StorageClass::Input) {
       assert(function_id_ == 0);
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, 4315,
           "Vulkan spec doesn't allow BuiltIn PointSize to be used for "
           "variables with Input storage class if execution model is "
           "Vertex.",
-          SpvExecutionModelVertex, decoration, built_in_inst,
+          spv::ExecutionModel::Vertex, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
       switch (execution_model) {
-        case SpvExecutionModelVertex: {
+        case spv::ExecutionModel::Vertex: {
           if (spv_result_t error = ValidateF32(
                   decoration, built_in_inst,
                   [this, &referenced_from_inst](
@@ -1853,10 +2185,11 @@ spv_result_t BuiltInsValidator::ValidatePointSizeAtReference(
           }
           break;
         }
-        case SpvExecutionModelTessellationControl:
-        case SpvExecutionModelTessellationEvaluation:
-        case SpvExecutionModelGeometry:
-        case SpvExecutionModelMeshNV: {
+        case spv::ExecutionModel::TessellationControl:
+        case spv::ExecutionModel::TessellationEvaluation:
+        case spv::ExecutionModel::Geometry:
+        case spv::ExecutionModel::MeshNV:
+        case spv::ExecutionModel::MeshEXT: {
           // PointSize can be a per-vertex variable for tessellation control,
           // tessellation evaluation and geometry shader stages. In such cases
           // variables will have an array of 32-bit floats.
@@ -1929,10 +2262,10 @@ spv_result_t BuiltInsValidator::ValidatePositionAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput &&
-        storage_class != SpvStorageClassOutput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input &&
+        storage_class != spv::StorageClass::Output) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4320) << "Vulkan spec allows BuiltIn Position to be only used for "
                 "variables with Input or Output storage class. "
@@ -1941,27 +2274,34 @@ spv_result_t BuiltInsValidator::ValidatePositionAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    if (storage_class == SpvStorageClassInput) {
+    if (storage_class == spv::StorageClass::Input) {
       assert(function_id_ == 0);
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, 4319,
           "Vulkan spec doesn't allow BuiltIn Position to be used "
           "for variables "
           "with Input storage class if execution model is Vertex.",
-          SpvExecutionModelVertex, decoration, built_in_inst,
+          spv::ExecutionModel::Vertex, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, 4319,
           "Vulkan spec doesn't allow BuiltIn Position to be used "
           "for variables "
           "with Input storage class if execution model is MeshNV.",
-          SpvExecutionModelMeshNV, decoration, built_in_inst,
+          spv::ExecutionModel::MeshNV, decoration, built_in_inst,
+          referenced_from_inst, std::placeholders::_1));
+      id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
+          &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, 4319,
+          "Vulkan spec doesn't allow BuiltIn Position to be used "
+          "for variables "
+          "with Input storage class if execution model is MeshEXT.",
+          spv::ExecutionModel::MeshEXT, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
       switch (execution_model) {
-        case SpvExecutionModelVertex: {
+        case spv::ExecutionModel::Vertex: {
           if (spv_result_t error = ValidateF32Vec(
                   decoration, built_in_inst, 4,
                   [this, &referenced_from_inst](
@@ -1977,10 +2317,11 @@ spv_result_t BuiltInsValidator::ValidatePositionAtReference(
           }
           break;
         }
-        case SpvExecutionModelGeometry:
-        case SpvExecutionModelTessellationControl:
-        case SpvExecutionModelTessellationEvaluation:
-        case SpvExecutionModelMeshNV: {
+        case spv::ExecutionModel::Geometry:
+        case spv::ExecutionModel::TessellationControl:
+        case spv::ExecutionModel::TessellationEvaluation:
+        case spv::ExecutionModel::MeshNV:
+        case spv::ExecutionModel::MeshEXT: {
           // Position can be a per-vertex variable for tessellation control,
           // tessellation evaluation, geometry and mesh shader stages. In such
           // cases variables will have an array of 4-component 32-bit float
@@ -2046,38 +2387,6 @@ spv_result_t BuiltInsValidator::ValidatePositionAtReference(
 
 spv_result_t BuiltInsValidator::ValidatePrimitiveIdAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
-  if (spvIsVulkanEnv(_.context()->target_env)) {
-    // PrimitiveId can be a per-primitive variable for mesh shader stage.
-    // In such cases variable will have an array of 32-bit integers.
-    if (decoration.struct_member_index() != Decoration::kInvalidMember) {
-      // This must be a 32-bit int scalar.
-      if (spv_result_t error = ValidateI32(
-              decoration, inst,
-              [this, &inst](const std::string& message) -> spv_result_t {
-                return _.diag(SPV_ERROR_INVALID_DATA, &inst)
-                       << _.VkErrorID(4337)
-                       << "According to the Vulkan spec BuiltIn PrimitiveId "
-                          "variable needs to be a 32-bit int scalar. "
-                       << message;
-              })) {
-        return error;
-      }
-    } else {
-      if (spv_result_t error = ValidateOptionalArrayedI32(
-              decoration, inst,
-              [this, &inst](const std::string& message) -> spv_result_t {
-                return _.diag(SPV_ERROR_INVALID_DATA, &inst)
-                       << _.VkErrorID(4337)
-                       << "According to the Vulkan spec BuiltIn PrimitiveId "
-                          "variable needs to be a 32-bit int scalar. "
-                       << message;
-              })) {
-        return error;
-      }
-    }
-  }
-
-  // Seed at reference checks with this built-in.
   return ValidatePrimitiveIdAtReference(decoration, inst, inst, inst);
 }
 
@@ -2086,10 +2395,10 @@ spv_result_t BuiltInsValidator::ValidatePrimitiveIdAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput &&
-        storage_class != SpvStorageClassOutput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input &&
+        storage_class != spv::StorageClass::Output) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << "Vulkan spec allows BuiltIn PrimitiveId to be only used for "
                 "variables with Input or Output storage class. "
@@ -2098,62 +2407,84 @@ spv_result_t BuiltInsValidator::ValidatePrimitiveIdAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    if (storage_class == SpvStorageClassOutput) {
+    if (storage_class == spv::StorageClass::Output) {
       assert(function_id_ == 0);
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, 4334,
           "Vulkan spec doesn't allow BuiltIn PrimitiveId to be used for "
           "variables with Output storage class if execution model is "
           "TessellationControl.",
-          SpvExecutionModelTessellationControl, decoration, built_in_inst,
+          spv::ExecutionModel::TessellationControl, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, 4334,
           "Vulkan spec doesn't allow BuiltIn PrimitiveId to be used for "
           "variables with Output storage class if execution model is "
           "TessellationEvaluation.",
-          SpvExecutionModelTessellationEvaluation, decoration, built_in_inst,
+          spv::ExecutionModel::TessellationEvaluation, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, 4334,
           "Vulkan spec doesn't allow BuiltIn PrimitiveId to be used for "
           "variables with Output storage class if execution model is "
           "Fragment.",
-          SpvExecutionModelFragment, decoration, built_in_inst,
+          spv::ExecutionModel::Fragment, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, 4334,
           "Vulkan spec doesn't allow BuiltIn PrimitiveId to be used for "
           "variables with Output storage class if execution model is "
           "IntersectionKHR.",
-          SpvExecutionModelIntersectionKHR, decoration, built_in_inst,
+          spv::ExecutionModel::IntersectionKHR, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, 4334,
           "Vulkan spec doesn't allow BuiltIn PrimitiveId to be used for "
           "variables with Output storage class if execution model is "
           "AnyHitKHR.",
-          SpvExecutionModelAnyHitKHR, decoration, built_in_inst,
+          spv::ExecutionModel::AnyHitKHR, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, 4334,
           "Vulkan spec doesn't allow BuiltIn PrimitiveId to be used for "
           "variables with Output storage class if execution model is "
           "ClosestHitKHR.",
-          SpvExecutionModelClosestHitKHR, decoration, built_in_inst,
+          spv::ExecutionModel::ClosestHitKHR, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
+    if (!_.HasCapability(spv::Capability::MeshShadingEXT) &&
+        !_.HasCapability(spv::Capability::MeshShadingNV) &&
+        !_.HasCapability(spv::Capability::Geometry) &&
+        !_.HasCapability(spv::Capability::Tessellation)) {
+      id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
+          &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, 4333,
+          "Vulkan spec doesn't allow BuiltIn PrimitiveId to be used for "
+          "variables in the Fragment execution model unless it declares "
+          "Geometry, Tessellation, or MeshShader capabilities.",
+          spv::ExecutionModel::Fragment, decoration, built_in_inst,
+          referenced_from_inst, std::placeholders::_1));
+    }
+
+    id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
+        &BuiltInsValidator::ValidateMeshBuiltinInterfaceRules, this, decoration,
+        built_in_inst, spv::Op::OpTypeInt, std::placeholders::_1));
+
+    id_to_at_reference_checks_[referenced_from_inst.id()].push_back(
+        std::bind(&BuiltInsValidator::ValidateNonMeshInterfaceRules, this,
+                  decoration, built_in_inst, std::placeholders::_1));
+
+    for (const spv::ExecutionModel execution_model : execution_models_) {
       switch (execution_model) {
-        case SpvExecutionModelFragment:
-        case SpvExecutionModelTessellationControl:
-        case SpvExecutionModelTessellationEvaluation:
-        case SpvExecutionModelGeometry:
-        case SpvExecutionModelMeshNV:
-        case SpvExecutionModelIntersectionKHR:
-        case SpvExecutionModelAnyHitKHR:
-        case SpvExecutionModelClosestHitKHR: {
+        case spv::ExecutionModel::Fragment:
+        case spv::ExecutionModel::TessellationControl:
+        case spv::ExecutionModel::TessellationEvaluation:
+        case spv::ExecutionModel::Geometry:
+        case spv::ExecutionModel::MeshNV:
+        case spv::ExecutionModel::MeshEXT:
+        case spv::ExecutionModel::IntersectionKHR:
+        case spv::ExecutionModel::AnyHitKHR:
+        case spv::ExecutionModel::ClosestHitKHR: {
           // Ok.
           break;
         }
@@ -2163,9 +2494,8 @@ spv_result_t BuiltInsValidator::ValidatePrimitiveIdAtReference(
                  << _.VkErrorID(4330)
                  << "Vulkan spec allows BuiltIn PrimitiveId to be used only "
                     "with Fragment, TessellationControl, "
-                    "TessellationEvaluation, Geometry, MeshNV, "
-                    "IntersectionKHR, "
-                    "AnyHitKHR, and ClosestHitKHR execution models. "
+                    "TessellationEvaluation, Geometry, MeshNV, MeshEXT, "
+                    "IntersectionKHR, AnyHitKHR, and ClosestHitKHR execution models. "
                  << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                      referenced_from_inst, execution_model);
         }
@@ -2208,9 +2538,9 @@ spv_result_t BuiltInsValidator::ValidateSampleIdAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4355)
              << "Vulkan spec allows BuiltIn SampleId to be only used for "
@@ -2220,8 +2550,8 @@ spv_result_t BuiltInsValidator::ValidateSampleIdAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4354)
                << "Vulkan spec allows BuiltIn SampleId to be used only with "
@@ -2267,10 +2597,10 @@ spv_result_t BuiltInsValidator::ValidateSampleMaskAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput &&
-        storage_class != SpvStorageClassOutput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input &&
+        storage_class != spv::StorageClass::Output) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4358)
              << "Vulkan spec allows BuiltIn SampleMask to be only used for "
@@ -2280,8 +2610,8 @@ spv_result_t BuiltInsValidator::ValidateSampleMaskAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4357)
                << "Vulkan spec allows BuiltIn SampleMask to be used only "
@@ -2329,9 +2659,9 @@ spv_result_t BuiltInsValidator::ValidateSamplePositionAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4361)
              << "Vulkan spec allows BuiltIn SamplePosition to be only used "
@@ -2342,8 +2672,8 @@ spv_result_t BuiltInsValidator::ValidateSamplePositionAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4360)
                << "Vulkan spec allows BuiltIn SamplePosition to be used only "
@@ -2391,9 +2721,9 @@ spv_result_t BuiltInsValidator::ValidateTessCoordAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4388)
              << "Vulkan spec allows BuiltIn TessCoord to be only used for "
@@ -2403,8 +2733,8 @@ spv_result_t BuiltInsValidator::ValidateTessCoordAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelTessellationEvaluation) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::TessellationEvaluation) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4387)
                << "Vulkan spec allows BuiltIn TessCoord to be used only with "
@@ -2440,6 +2770,13 @@ spv_result_t BuiltInsValidator::ValidateTessLevelOuterAtDefinition(
             })) {
       return error;
     }
+
+    if (!_.HasDecoration(inst.id(), spv::Decoration::Patch)) {
+      return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+             << _.VkErrorID(10880)
+             << "BuiltIn TessLevelOuter variable needs to also have a Patch "
+                "decoration.";
+    }
   }
 
   // Seed at reference checks with this built-in.
@@ -2454,12 +2791,19 @@ spv_result_t BuiltInsValidator::ValidateTessLevelInnerAtDefinition(
             [this, &inst](const std::string& message) -> spv_result_t {
               return _.diag(SPV_ERROR_INVALID_DATA, &inst)
                      << _.VkErrorID(4397)
-                     << "According to the Vulkan spec BuiltIn TessLevelOuter "
+                     << "According to the Vulkan spec BuiltIn TessLevelInner "
                         "variable needs to be a 2-component 32-bit float "
                         "array. "
                      << message;
             })) {
       return error;
+    }
+
+    if (!_.HasDecoration(inst.id(), spv::Decoration::Patch)) {
+      return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+             << _.VkErrorID(10880)
+             << "BuiltIn TessLevelInner variable needs to also have a Patch "
+                "decoration.";
     }
   }
 
@@ -2471,12 +2815,12 @@ spv_result_t BuiltInsValidator::ValidateTessLevelAtReference(
     const Decoration& decoration, const Instruction& built_in_inst,
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
-  uint32_t operand = decoration.params()[0];
+  uint32_t operand = (uint32_t)decoration.builtin();
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput &&
-        storage_class != SpvStorageClassOutput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input &&
+        storage_class != spv::StorageClass::Output) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << "Vulkan spec allows BuiltIn "
              << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -2488,42 +2832,44 @@ spv_result_t BuiltInsValidator::ValidateTessLevelAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    if (storage_class == SpvStorageClassInput) {
+    if (storage_class == spv::StorageClass::Input) {
       assert(function_id_ == 0);
-      uint32_t vuid = (decoration.params()[0] == SpvBuiltInTessLevelOuter) ? 4391 : 4395;
+      uint32_t vuid =
+          (decoration.builtin() == spv::BuiltIn::TessLevelOuter) ? 4391 : 4395;
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, vuid,
           "Vulkan spec doesn't allow TessLevelOuter/TessLevelInner to be "
           "used "
           "for variables with Input storage class if execution model is "
           "TessellationControl.",
-          SpvExecutionModelTessellationControl, decoration, built_in_inst,
+          spv::ExecutionModel::TessellationControl, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
     }
 
-    if (storage_class == SpvStorageClassOutput) {
+    if (storage_class == spv::StorageClass::Output) {
       assert(function_id_ == 0);
-      uint32_t vuid = (decoration.params()[0] == SpvBuiltInTessLevelOuter) ? 4392 : 4396;
+      uint32_t vuid =
+          (decoration.builtin() == spv::BuiltIn::TessLevelOuter) ? 4392 : 4396;
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
           &BuiltInsValidator::ValidateNotCalledWithExecutionModel, this, vuid,
           "Vulkan spec doesn't allow TessLevelOuter/TessLevelInner to be "
           "used "
           "for variables with Output storage class if execution model is "
           "TessellationEvaluation.",
-          SpvExecutionModelTessellationEvaluation, decoration, built_in_inst,
+          spv::ExecutionModel::TessellationEvaluation, decoration, built_in_inst,
           referenced_from_inst, std::placeholders::_1));
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
       switch (execution_model) {
-        case SpvExecutionModelTessellationControl:
-        case SpvExecutionModelTessellationEvaluation: {
+        case spv::ExecutionModel::TessellationControl:
+        case spv::ExecutionModel::TessellationEvaluation: {
           // Ok.
           break;
         }
 
         default: {
-          uint32_t vuid = (operand == SpvBuiltInTessLevelOuter) ? 4390 : 4394;
+          uint32_t vuid = (spv::BuiltIn(operand) == spv::BuiltIn::TessLevelOuter) ? 4390 : 4394;
           return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                  << _.VkErrorID(vuid) << "Vulkan spec allows BuiltIn "
                  << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -2582,14 +2928,69 @@ spv_result_t BuiltInsValidator::ValidateVertexIdAtDefinition(
 
 spv_result_t BuiltInsValidator::ValidateLocalInvocationIndexAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
+  if (spvIsVulkanEnv(_.context()->target_env)) {
+    if (spv_result_t error = ValidateI32(
+            decoration, inst,
+            [this, &inst](const std::string& message) -> spv_result_t {
+              uint32_t vuid = GetVUIDForBuiltin(
+                  spv::BuiltIn::LocalInvocationIndex, VUIDErrorType);
+              return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                     << _.VkErrorID(vuid)
+                     << "According to the Vulkan spec BuiltIn "
+                        "LocalInvocationIndex variable needs to be a 32-bit "
+                        "int scalar. "
+                     << message;
+            })) {
+      return error;
+    }
+  }
+
   // Seed at reference checks with this built-in.
   return ValidateLocalInvocationIndexAtReference(decoration, inst, inst, inst);
 }
 
 spv_result_t BuiltInsValidator::ValidateLocalInvocationIndexAtReference(
     const Decoration& decoration, const Instruction& built_in_inst,
-    const Instruction&,
+    const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
+  if (spvIsVulkanEnv(_.context()->target_env)) {
+    const spv::StorageClass storage_class =
+        GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
+      uint32_t vuid = GetVUIDForBuiltin(spv::BuiltIn::LocalInvocationIndex,
+                                        VUIDErrorStorageClass);
+      return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
+             << _.VkErrorID(vuid)
+             << "Vulkan spec allows BuiltIn LocalInvocationIndex to be only "
+                "used for variables with Input storage class. "
+             << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
+                                 referenced_from_inst)
+             << " " << GetStorageClassDesc(referenced_from_inst);
+    }
+
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      bool has_vulkan_model =
+          execution_model == spv::ExecutionModel::GLCompute ||
+          execution_model == spv::ExecutionModel::TaskNV ||
+          execution_model == spv::ExecutionModel::MeshNV ||
+          execution_model == spv::ExecutionModel::TaskEXT ||
+          execution_model == spv::ExecutionModel::MeshEXT;
+
+      if (spvIsVulkanEnv(_.context()->target_env) && !has_vulkan_model) {
+        uint32_t vuid = GetVUIDForBuiltin(spv::BuiltIn::LocalInvocationIndex,
+                                          VUIDErrorExecutionModel);
+        return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
+               << _.VkErrorID(vuid)
+               << "Vulkan spec allows BuiltIn LocalInvocationIndex to be used "
+                  "only with GLCompute, MeshNV, TaskNV, MeshEXT or"
+               << " TaskEXT execution model. "
+               << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
+                                   referenced_from_inst, execution_model);
+      }
+    }
+  }
+
   if (function_id_ == 0) {
     // Propagate this rule to all dependant ids in the global scope.
     id_to_at_reference_checks_[referenced_from_inst.id()].push_back(
@@ -2606,9 +3007,9 @@ spv_result_t BuiltInsValidator::ValidateVertexIndexAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4399) << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn VertexIndex to be only used for "
@@ -2618,8 +3019,8 @@ spv_result_t BuiltInsValidator::ValidateVertexIndexAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelVertex) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Vertex) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4398)
                << spvLogStringForEnv(_.context()->target_env)
@@ -2641,50 +3042,270 @@ spv_result_t BuiltInsValidator::ValidateVertexIndexAtReference(
   return SPV_SUCCESS;
 }
 
-spv_result_t BuiltInsValidator::ValidateLayerOrViewportIndexAtDefinition(
-    const Decoration& decoration, const Instruction& inst) {
-  if (spvIsVulkanEnv(_.context()->target_env)) {
-    // This can be a per-primitive variable for mesh shader stage.
-    // In such cases variable will have an array of 32-bit integers.
-    if (decoration.struct_member_index() != Decoration::kInvalidMember) {
-      // This must be a 32-bit int scalar.
-      if (spv_result_t error = ValidateI32(
-              decoration, inst,
-              [this, &decoration,
-               &inst](const std::string& message) -> spv_result_t {
-                uint32_t vuid =
-                    (decoration.params()[0] == SpvBuiltInLayer) ? 4276 : 4408;
+typedef struct {
+  uint32_t array_type;
+  uint32_t array_size;
+  uint32_t block_array_size;
+  uint32_t perprim_deco;
+} MeshBuiltinVUIDs;
+
+spv_result_t BuiltInsValidator::ValidateMeshBuiltinInterfaceRules(
+    const Decoration& decoration, const Instruction& inst, spv::Op scalar_type,
+    const Instruction& referenced_from_inst) {
+  if (function_id_) {
+    if (!execution_models_.count(spv::ExecutionModel::MeshEXT)) {
+      return SPV_SUCCESS;
+    }
+
+    const spv::BuiltIn builtin = decoration.builtin();
+    const bool is_topology =
+        builtin == spv::BuiltIn::PrimitiveTriangleIndicesEXT ||
+        builtin == spv::BuiltIn::PrimitiveLineIndicesEXT ||
+        builtin == spv::BuiltIn::PrimitivePointIndicesEXT;
+
+    // These builtin have the ability to be an array with MeshEXT
+    // When an array, we need to make sure the array size lines up
+    std::map<uint32_t, uint32_t> entry_interface_id_map;
+    const bool is_interface_var =
+        IsMeshInterfaceVar(inst, entry_interface_id_map);
+
+    if (!is_topology) {
+      bool is_block = false;
+
+      static const std::unordered_map<spv::BuiltIn, MeshBuiltinVUIDs>
+          mesh_vuid_map = {{
+              {spv::BuiltIn::CullPrimitiveEXT, {7036, 10589, 10590, 7038}},
+              {spv::BuiltIn::PrimitiveId, {10595, 10596, 10597, 7040}},
+              {spv::BuiltIn::Layer, {10592, 10593, 10594, 7039}},
+              {spv::BuiltIn::ViewportIndex, {10601, 10602, 10603, 7060}},
+              {spv::BuiltIn::PrimitiveShadingRateKHR,
+               {10598, 10599, 10600, 7059}},
+          }};
+      const MeshBuiltinVUIDs& vuids = mesh_vuid_map.at(builtin);
+      if (spv_result_t error = ValidateBlockTypeOrArrayedType(
+              decoration, inst, is_block, scalar_type,
+              [this, &inst, &builtin, &scalar_type,
+               &vuids](const std::string& message) -> spv_result_t {
                 return _.diag(SPV_ERROR_INVALID_DATA, &inst)
-                       << _.VkErrorID(vuid)
-                       << "According to the Vulkan spec BuiltIn "
+                       << _.VkErrorID(vuids.array_type)
+                       << "According to the Vulkan specspec BuiltIn "
                        << _.grammar().lookupOperandName(
-                              SPV_OPERAND_TYPE_BUILT_IN, decoration.params()[0])
-                       << "variable needs to be a 32-bit int scalar. "
-                       << message;
+                              SPV_OPERAND_TYPE_BUILT_IN, (uint32_t)builtin)
+                       << " variable needs to be a either a "
+                       << spvOpcodeString(scalar_type)
+                       << " or an "
+                          "array of "
+                       << spvOpcodeString(scalar_type) << ". " << message;
               })) {
         return error;
       }
-    } else {
-      if (spv_result_t error = ValidateOptionalArrayedI32(
+
+      if (!_.HasDecoration(inst.id(), spv::Decoration::PerPrimitiveEXT)) {
+        return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+               << _.VkErrorID(vuids.perprim_deco)
+               << "According to the Vulkan spec the variable decorated with "
+                  "Builtin "
+               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
+                                                (uint32_t)builtin)
+               << " within the MeshEXT Execution Model must also be "
+               << "decorated with the PerPrimitiveEXT decoration. ";
+      }
+      if (is_interface_var) {
+        for (const auto& id : entry_interface_id_map) {
+          uint32_t entry_point_id = id.first;
+          uint32_t interface_var_id = id.second;
+
+          const uint64_t interface_size = GetArrayLength(interface_var_id);
+          const uint32_t output_prim_size =
+              _.GetOutputPrimitivesEXT(entry_point_id);
+          if (interface_size != output_prim_size) {
+            return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                   << _.VkErrorID(is_block ? vuids.block_array_size
+                                           : vuids.array_size)
+                   << " The size of the array decorated with "
+                   << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
+                                                    (uint32_t)builtin)
+                   << " (" << interface_size
+                   << ") must match the value specified by OutputPrimitivesEXT "
+                      "("
+                   << output_prim_size << "). ";
+          }
+        }
+      }
+    }
+
+    if (is_interface_var && is_topology) {
+      for (const auto& id : entry_interface_id_map) {
+        uint32_t entry_point_id = id.first;
+
+        uint64_t max_output_primitives =
+            _.GetOutputPrimitivesEXT(entry_point_id);
+        uint32_t underlying_type = 0;
+        if (spv_result_t error =
+                GetUnderlyingType(_, decoration, inst, &underlying_type)) {
+          return error;
+        }
+
+        uint64_t primitive_array_dim = 0;
+        if (_.GetIdOpcode(underlying_type) == spv::Op::OpTypeArray) {
+          underlying_type = _.FindDef(underlying_type)->word(3u);
+          if (!_.EvalConstantValUint64(underlying_type, &primitive_array_dim)) {
+            assert(0 && "Array type definition is corrupt");
+          }
+        }
+
+        const auto* modes = _.GetExecutionModes(entry_point_id);
+        if (builtin == spv::BuiltIn::PrimitiveTriangleIndicesEXT) {
+          if (!modes || !modes->count(spv::ExecutionMode::OutputTrianglesEXT)) {
+            return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                   << _.VkErrorID(7054)
+                   << "The PrimitiveTriangleIndicesEXT decoration must be used "
+                      "with the OutputTrianglesEXT Execution Mode. ";
+          }
+          if (primitive_array_dim &&
+              primitive_array_dim != max_output_primitives) {
+            return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                   << _.VkErrorID(7058)
+                   << "The size of the array decorated with "
+                      "PrimitiveTriangleIndicesEXT ("
+                   << primitive_array_dim
+                   << ") must match the value specified "
+                      "by OutputPrimitivesEXT ("
+                   << max_output_primitives << "). ";
+          }
+        } else if (builtin == spv::BuiltIn::PrimitiveLineIndicesEXT) {
+          if (!modes || !modes->count(spv::ExecutionMode::OutputLinesEXT)) {
+            return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                   << _.VkErrorID(7048)
+                   << "The PrimitiveLineIndicesEXT decoration must be used "
+                      "with the OutputLinesEXT Execution Mode. ";
+          }
+          if (primitive_array_dim &&
+              primitive_array_dim != max_output_primitives) {
+            return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                   << _.VkErrorID(7052)
+                   << "The size of the array decorated with "
+                      "PrimitiveLineIndicesEXT ("
+                   << primitive_array_dim
+                   << ") must match the value specified "
+                      "by OutputPrimitivesEXT ("
+                   << max_output_primitives << "). ";
+          }
+
+        } else if (builtin == spv::BuiltIn::PrimitivePointIndicesEXT) {
+          if (!modes || !modes->count(spv::ExecutionMode::OutputPoints)) {
+            return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                   << _.VkErrorID(7042)
+                   << "The PrimitivePointIndicesEXT decoration must be used "
+                      "with the OutputPoints Execution Mode. ";
+          }
+          if (primitive_array_dim &&
+              primitive_array_dim != max_output_primitives) {
+            return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                   << _.VkErrorID(7046)
+                   << "The size of the array decorated with "
+                      "PrimitivePointIndicesEXT ("
+                   << primitive_array_dim
+                   << ") must match the value specified "
+                      "by OutputPrimitivesEXT ("
+                   << max_output_primitives << "). ";
+          }
+        }
+      }
+    }
+  } else {
+    // Propagate this rule to all dependant ids in the global scope.
+    id_to_at_reference_checks_[referenced_from_inst.id()].push_back(
+        std::bind(&BuiltInsValidator::ValidateMeshBuiltinInterfaceRules, this,
+                  decoration, inst, scalar_type, std::placeholders::_1));
+  }
+  return SPV_SUCCESS;
+}
+
+spv_result_t BuiltInsValidator::ValidatePrimitiveShadingRateInterfaceRules(
+    const Decoration& decoration, const Instruction& inst,
+    const Instruction& referenced_from_inst) {
+  if (function_id_) {
+    if (!execution_models_.count(spv::ExecutionModel::MeshEXT)) {
+      if (spv_result_t error = ValidateI32(
               decoration, inst,
-              [this, &decoration,
-               &inst](const std::string& message) -> spv_result_t {
-                uint32_t vuid =
-                    (decoration.params()[0] == SpvBuiltInLayer) ? 4276 : 4408;
+              [this, &inst,
+               &decoration](const std::string& message) -> spv_result_t {
                 return _.diag(SPV_ERROR_INVALID_DATA, &inst)
-                       << _.VkErrorID(vuid)
+                       << _.VkErrorID(4486)
                        << "According to the Vulkan spec BuiltIn "
                        << _.grammar().lookupOperandName(
-                              SPV_OPERAND_TYPE_BUILT_IN, decoration.params()[0])
-                       << "variable needs to be a 32-bit int scalar. "
+                              SPV_OPERAND_TYPE_BUILT_IN,
+                              (uint32_t)decoration.builtin())
+                       << " variable needs to be a 32-bit int scalar. "
                        << message;
               })) {
         return error;
       }
     }
+  } else {
+    // Propagate this rule to all dependant ids in the global scope.
+    id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
+        &BuiltInsValidator::ValidatePrimitiveShadingRateInterfaceRules, this,
+        decoration, inst, std::placeholders::_1));
   }
+  return SPV_SUCCESS;
+}
 
-  // Seed at reference checks with this built-in.
+// For Layer, ViewportIndex, and PrimitiveId
+spv_result_t BuiltInsValidator::ValidateNonMeshInterfaceRules(
+    const Decoration& decoration, const Instruction& inst,
+    const Instruction& referenced_from_inst) {
+  if (function_id_) {
+    // This can be a per-primitive variable for NV mesh shader stage.
+    // In such cases variable will have an array of 32-bit integers.
+    if (!execution_models_.count(spv::ExecutionModel::MeshEXT)) {
+      const spv::BuiltIn builtin = decoration.builtin();
+      const uint32_t vuid = (builtin == spv::BuiltIn::Layer)           ? 4276
+                            : (builtin == spv::BuiltIn::ViewportIndex) ? 4408
+                                                                       : 4337;
+      if (decoration.struct_member_index() != Decoration::kInvalidMember) {
+        if (spv_result_t error = ValidateI32(
+                decoration, inst,
+                [this, &vuid, builtin,
+                 &inst](const std::string& message) -> spv_result_t {
+                  return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                         << _.VkErrorID(vuid)
+                         << "According to the Vulkan spec BuiltIn "
+                         << _.grammar().lookupOperandName(
+                                SPV_OPERAND_TYPE_BUILT_IN, (uint32_t)builtin)
+                         << "variable needs to be a 32-bit int scalar. "
+                         << message;
+                })) {
+          return error;
+        }
+      } else if (spv_result_t error = ValidateOptionalArrayedI32(
+                     decoration, inst,
+                     [this, &vuid, builtin,
+                      &inst](const std::string& message) -> spv_result_t {
+                       return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                              << _.VkErrorID(vuid)
+                              << "According to the Vulkan spec BuiltIn "
+                              << _.grammar().lookupOperandName(
+                                     SPV_OPERAND_TYPE_BUILT_IN,
+                                     (uint32_t)builtin)
+                              << "variable needs to be a 32-bit int scalar. "
+                              << message;
+                     })) {
+        return error;
+      }
+    }
+  } else {
+    // Propagate this rule to all dependant ids in the global scope.
+    id_to_at_reference_checks_[referenced_from_inst.id()].push_back(
+        std::bind(&BuiltInsValidator::ValidateNonMeshInterfaceRules, this,
+                  decoration, inst, std::placeholders::_1));
+  }
+  return SPV_SUCCESS;
+}
+
+spv_result_t BuiltInsValidator::ValidateLayerOrViewportIndexAtDefinition(
+    const Decoration& decoration, const Instruction& inst) {
   return ValidateLayerOrViewportIndexAtReference(decoration, inst, inst, inst);
 }
 
@@ -2692,12 +3313,12 @@ spv_result_t BuiltInsValidator::ValidateLayerOrViewportIndexAtReference(
     const Decoration& decoration, const Instruction& built_in_inst,
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
-  uint32_t operand = decoration.params()[0];
+  uint32_t operand = (uint32_t)decoration.builtin();
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput &&
-        storage_class != SpvStorageClassOutput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input &&
+        storage_class != spv::StorageClass::Output) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << "Vulkan spec allows BuiltIn "
              << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -2709,63 +3330,73 @@ spv_result_t BuiltInsValidator::ValidateLayerOrViewportIndexAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    if (storage_class == SpvStorageClassInput) {
+    if (storage_class == spv::StorageClass::Input) {
       assert(function_id_ == 0);
       for (const auto em :
-           {SpvExecutionModelVertex, SpvExecutionModelTessellationEvaluation,
-            SpvExecutionModelGeometry, SpvExecutionModelMeshNV}) {
+           {spv::ExecutionModel::Vertex, spv::ExecutionModel::TessellationEvaluation,
+            spv::ExecutionModel::Geometry, spv::ExecutionModel::MeshNV,
+            spv::ExecutionModel::MeshEXT}) {
         id_to_at_reference_checks_[referenced_from_inst.id()].push_back(
             std::bind(&BuiltInsValidator::ValidateNotCalledWithExecutionModel,
-                      this, ((operand == SpvBuiltInLayer) ? 4274 : 4406),
+                      this, ((spv::BuiltIn(operand) == spv::BuiltIn::Layer) ? 4274 : 4406),
                       "Vulkan spec doesn't allow BuiltIn Layer and "
                       "ViewportIndex to be "
                       "used for variables with Input storage class if "
                       "execution model is Vertex, TessellationEvaluation, "
-                      "Geometry, or MeshNV.",
+                      "Geometry, MeshNV or MeshEXT.",
                       em, decoration, built_in_inst, referenced_from_inst,
                       std::placeholders::_1));
       }
     }
 
-    if (storage_class == SpvStorageClassOutput) {
+    if (storage_class == spv::StorageClass::Output) {
       assert(function_id_ == 0);
       id_to_at_reference_checks_[referenced_from_inst.id()].push_back(
           std::bind(&BuiltInsValidator::ValidateNotCalledWithExecutionModel,
-                    this, ((operand == SpvBuiltInLayer) ? 4275 : 4407),
+                    this, ((spv::BuiltIn(operand) == spv::BuiltIn::Layer) ? 4275 : 4407),
                     "Vulkan spec doesn't allow BuiltIn Layer and "
                     "ViewportIndex to be "
                     "used for variables with Output storage class if "
                     "execution model is "
                     "Fragment.",
-                    SpvExecutionModelFragment, decoration, built_in_inst,
+                    spv::ExecutionModel::Fragment, decoration, built_in_inst,
                     referenced_from_inst, std::placeholders::_1));
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
+    id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
+        &BuiltInsValidator::ValidateMeshBuiltinInterfaceRules, this, decoration,
+        built_in_inst, spv::Op::OpTypeInt, std::placeholders::_1));
+
+    id_to_at_reference_checks_[referenced_from_inst.id()].push_back(
+        std::bind(&BuiltInsValidator::ValidateNonMeshInterfaceRules, this,
+                  decoration, built_in_inst, std::placeholders::_1));
+
+    for (const spv::ExecutionModel execution_model : execution_models_) {
       switch (execution_model) {
-        case SpvExecutionModelGeometry:
-        case SpvExecutionModelFragment:
-        case SpvExecutionModelMeshNV:
+        case spv::ExecutionModel::Geometry:
+        case spv::ExecutionModel::Fragment:
+        case spv::ExecutionModel::MeshNV:
+        case spv::ExecutionModel::MeshEXT:
           // Ok.
           break;
-        case SpvExecutionModelVertex:
-        case SpvExecutionModelTessellationEvaluation: {
-          if (!_.HasCapability(SpvCapabilityShaderViewportIndexLayerEXT)) {
-            if (operand == SpvBuiltInViewportIndex &&
-                _.HasCapability(SpvCapabilityShaderViewportIndex))
+        case spv::ExecutionModel::Vertex:
+        case spv::ExecutionModel::TessellationEvaluation: {
+          if (!_.HasCapability(spv::Capability::ShaderViewportIndexLayerEXT)) {
+            if (spv::BuiltIn(operand) == spv::BuiltIn::ViewportIndex &&
+                _.HasCapability(spv::Capability::ShaderViewportIndex))
               break;  // Ok
-            if (operand == SpvBuiltInLayer &&
-                _.HasCapability(SpvCapabilityShaderLayer))
+            if (spv::BuiltIn(operand) == spv::BuiltIn::Layer &&
+                _.HasCapability(spv::Capability::ShaderLayer))
               break;  // Ok
 
             const char* capability = "ShaderViewportIndexLayerEXT";
 
-            if (operand == SpvBuiltInViewportIndex)
+            if (spv::BuiltIn(operand) == spv::BuiltIn::ViewportIndex)
               capability = "ShaderViewportIndexLayerEXT or ShaderViewportIndex";
-            if (operand == SpvBuiltInLayer)
+            if (spv::BuiltIn(operand) == spv::BuiltIn::Layer)
               capability = "ShaderViewportIndexLayerEXT or ShaderLayer";
 
-            uint32_t vuid = (operand == SpvBuiltInLayer) ? 4273 : 4405;
+            uint32_t vuid = (spv::BuiltIn(operand) == spv::BuiltIn::Layer) ? 4273 : 4405;
             return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                    << _.VkErrorID(vuid) << "Using BuiltIn "
                    << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -2776,7 +3407,7 @@ spv_result_t BuiltInsValidator::ValidateLayerOrViewportIndexAtReference(
           break;
         }
         default: {
-          uint32_t vuid = (operand == SpvBuiltInLayer) ? 4272 : 4404;
+          uint32_t vuid = (spv::BuiltIn(operand) == spv::BuiltIn::Layer) ? 4272 : 4404;
           return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                  << _.VkErrorID(vuid) << "Vulkan spec allows BuiltIn "
                  << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -2804,7 +3435,7 @@ spv_result_t BuiltInsValidator::ValidateLayerOrViewportIndexAtReference(
 spv_result_t BuiltInsValidator::ValidateFragmentShaderF32Vec3InputAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
+    const spv::BuiltIn builtin = decoration.builtin();
     if (spv_result_t error = ValidateF32Vec(
             decoration, inst, 3,
             [this, &inst, builtin](const std::string& message) -> spv_result_t {
@@ -2814,7 +3445,7 @@ spv_result_t BuiltInsValidator::ValidateFragmentShaderF32Vec3InputAtDefinition(
                      << spvLogStringForEnv(_.context()->target_env)
                      << " spec BuiltIn "
                      << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      builtin)
+                                                      uint32_t(builtin))
                      << " variable needs to be a 3-component 32-bit float "
                         "vector. "
                      << message;
@@ -2834,29 +3465,29 @@ spv_result_t BuiltInsValidator::ValidateFragmentShaderF32Vec3InputAtReference(
     const Instruction& referenced_from_inst) {
 
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::BuiltIn builtin = decoration.builtin();
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(vuid) << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " to be only used for variables with Input storage class. "
              << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                  referenced_from_inst)
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorExecutionModel);
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(vuid)
                << spvLogStringForEnv(_.context()->target_env)
                << " spec allows BuiltIn "
-               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                << " to be used only with Fragment execution model. "
                << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                    referenced_from_inst, execution_model);
@@ -2878,7 +3509,7 @@ spv_result_t BuiltInsValidator::ValidateFragmentShaderF32Vec3InputAtReference(
 spv_result_t BuiltInsValidator::ValidateComputeShaderI32Vec3InputAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
+    const spv::BuiltIn builtin = decoration.builtin();
     if (spv_result_t error = ValidateI32Vec(
             decoration, inst, 3,
             [this, &inst, builtin](const std::string& message) -> spv_result_t {
@@ -2888,7 +3519,7 @@ spv_result_t BuiltInsValidator::ValidateComputeShaderI32Vec3InputAtDefinition(
                      << spvLogStringForEnv(_.context()->target_env)
                      << " spec BuiltIn "
                      << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      builtin)
+                                                      uint32_t(builtin))
                      << " variable needs to be a 3-component 32-bit int "
                         "vector. "
                      << message;
@@ -2907,33 +3538,37 @@ spv_result_t BuiltInsValidator::ValidateComputeShaderI32Vec3InputAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::BuiltIn builtin = decoration.builtin();
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(vuid) << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " to be only used for variables with Input storage class. "
              << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                  referenced_from_inst)
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      bool has_vulkan_model = execution_model == SpvExecutionModelGLCompute ||
-                              execution_model == SpvExecutionModelTaskNV ||
-                              execution_model == SpvExecutionModelMeshNV;
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      bool has_vulkan_model = execution_model == spv::ExecutionModel::GLCompute ||
+                              execution_model == spv::ExecutionModel::TaskNV ||
+                              execution_model == spv::ExecutionModel::MeshNV ||
+                              execution_model == spv::ExecutionModel::TaskEXT ||
+                              execution_model == spv::ExecutionModel::MeshEXT;
+
       if (spvIsVulkanEnv(_.context()->target_env) && !has_vulkan_model) {
         uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorExecutionModel);
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(vuid)
                << spvLogStringForEnv(_.context()->target_env)
                << " spec allows BuiltIn "
-               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
-               << " to be used only with GLCompute, MeshNV, or TaskNV execution model. "
+               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
+               << " to be used only with GLCompute, MeshNV, TaskNV, MeshEXT or"
+               << " TaskEXT execution model. "
                << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                    referenced_from_inst, execution_model);
       }
@@ -2954,11 +3589,11 @@ spv_result_t BuiltInsValidator::ValidateComputeShaderI32Vec3InputAtReference(
 spv_result_t BuiltInsValidator::ValidateComputeI32InputAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
+    const spv::BuiltIn builtin = decoration.builtin();
     if (decoration.struct_member_index() != Decoration::kInvalidMember) {
       return _.diag(SPV_ERROR_INVALID_DATA, &inst)
              << "BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " cannot be used as a member decoration ";
     }
     if (spv_result_t error = ValidateI32(
@@ -2970,7 +3605,7 @@ spv_result_t BuiltInsValidator::ValidateComputeI32InputAtDefinition(
                      << "According to the "
                      << spvLogStringForEnv(_.context()->target_env)
                      << " spec BuiltIn "
-                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                      << " variable needs to be a 32-bit int "
                         "vector. "
                      << message;
@@ -2988,34 +3623,37 @@ spv_result_t BuiltInsValidator::ValidateComputeI32InputAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::BuiltIn builtin = decoration.builtin();
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(vuid)
              << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " to be only used for variables with Input storage class. "
              << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                  referenced_from_inst)
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      bool has_vulkan_model = execution_model == SpvExecutionModelGLCompute ||
-                              execution_model == SpvExecutionModelTaskNV ||
-                              execution_model == SpvExecutionModelMeshNV;
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      bool has_vulkan_model = execution_model == spv::ExecutionModel::GLCompute ||
+                              execution_model == spv::ExecutionModel::TaskNV ||
+                              execution_model == spv::ExecutionModel::MeshNV ||
+                              execution_model == spv::ExecutionModel::TaskEXT ||
+                              execution_model == spv::ExecutionModel::MeshEXT;
       if (spvIsVulkanEnv(_.context()->target_env) && !has_vulkan_model) {
         uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorExecutionModel);
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(vuid)
                << spvLogStringForEnv(_.context()->target_env)
                << " spec allows BuiltIn "
-               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
-               << " to be used only with GLCompute, MeshNV, or TaskNV execution model. "
+               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
+               << " to be used only with GLCompute, MeshNV, TaskNV, MeshEXT or "
+               << "TaskEXT execution model. "
                << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                    referenced_from_inst, execution_model);
       }
@@ -3036,11 +3674,11 @@ spv_result_t BuiltInsValidator::ValidateComputeI32InputAtReference(
 spv_result_t BuiltInsValidator::ValidateI32InputAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
+    const spv::BuiltIn builtin = decoration.builtin();
     if (decoration.struct_member_index() != Decoration::kInvalidMember) {
       return _.diag(SPV_ERROR_INVALID_DATA, &inst)
              << "BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " cannot be used as a member decoration ";
     }
     if (spv_result_t error = ValidateI32(
@@ -3052,21 +3690,21 @@ spv_result_t BuiltInsValidator::ValidateI32InputAtDefinition(
                      << "According to the "
                      << spvLogStringForEnv(_.context()->target_env)
                      << " spec BuiltIn "
-                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                      << " variable needs to be a 32-bit int. " << message;
             })) {
       return error;
     }
 
-    const SpvStorageClass storage_class = GetStorageClass(inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
       return _.diag(SPV_ERROR_INVALID_DATA, &inst)
              << _.VkErrorID(vuid)
              << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " to be only used for variables with Input storage class. "
              << GetReferenceDesc(decoration, inst, inst, inst) << " "
              << GetStorageClassDesc(inst);
@@ -3079,11 +3717,11 @@ spv_result_t BuiltInsValidator::ValidateI32InputAtDefinition(
 spv_result_t BuiltInsValidator::ValidateI32Vec4InputAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
+    const spv::BuiltIn builtin = decoration.builtin();
     if (decoration.struct_member_index() != Decoration::kInvalidMember) {
       return _.diag(SPV_ERROR_INVALID_DATA, &inst)
              << "BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " cannot be used as a member decoration ";
     }
     if (spv_result_t error = ValidateI32Vec(
@@ -3095,7 +3733,7 @@ spv_result_t BuiltInsValidator::ValidateI32Vec4InputAtDefinition(
                      << "According to the "
                      << spvLogStringForEnv(_.context()->target_env)
                      << " spec BuiltIn "
-                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                      << " variable needs to be a 4-component 32-bit int "
                         "vector. "
                      << message;
@@ -3103,15 +3741,15 @@ spv_result_t BuiltInsValidator::ValidateI32Vec4InputAtDefinition(
       return error;
     }
 
-    const SpvStorageClass storage_class = GetStorageClass(inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
       return _.diag(SPV_ERROR_INVALID_DATA, &inst)
              << _.VkErrorID(vuid)
              << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " to be only used for variables with Input storage class. "
              << GetReferenceDesc(decoration, inst, inst, inst) << " "
              << GetStorageClassDesc(inst);
@@ -3123,16 +3761,8 @@ spv_result_t BuiltInsValidator::ValidateI32Vec4InputAtDefinition(
 
 spv_result_t BuiltInsValidator::ValidateWorkgroupSizeAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
+  // Vulkan requires 32-bit int, but Universal has no restrictions
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    if (spvIsVulkanEnv(_.context()->target_env) &&
-        !spvOpcodeIsConstant(inst.opcode())) {
-      return _.diag(SPV_ERROR_INVALID_DATA, &inst)
-             << _.VkErrorID(4426)
-             << "Vulkan spec requires BuiltIn WorkgroupSize to be a "
-                "constant. "
-             << GetIdDesc(inst) << " is not a constant.";
-    }
-
     if (spv_result_t error = ValidateI32Vec(
             decoration, inst, 3,
             [this, &inst](const std::string& message) -> spv_result_t {
@@ -3147,6 +3777,69 @@ spv_result_t BuiltInsValidator::ValidateWorkgroupSizeAtDefinition(
     }
   }
 
+  if (!spvOpcodeIsConstant(inst.opcode())) {
+    if (spvIsVulkanEnv(_.context()->target_env)) {
+      return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+             << _.VkErrorID(4426)
+             << "Vulkan spec requires BuiltIn WorkgroupSize to be a "
+                "constant. "
+             << GetIdDesc(inst) << " is not a constant.";
+    }
+  } else if (inst.opcode() == spv::Op::OpConstantComposite) {
+    // can only validate product if static and not spec constant
+    if (_.FindDef(inst.word(3))->opcode() == spv::Op::OpConstant &&
+        _.FindDef(inst.word(4))->opcode() == spv::Op::OpConstant &&
+        _.FindDef(inst.word(5))->opcode() == spv::Op::OpConstant) {
+      uint64_t x_size, y_size, z_size;
+      // ValidateI32Vec above confirms there will be 3 words to read
+      bool static_x = _.EvalConstantValUint64(inst.word(3), &x_size);
+      bool static_y = _.EvalConstantValUint64(inst.word(4), &y_size);
+      bool static_z = _.EvalConstantValUint64(inst.word(5), &z_size);
+      if (static_x && static_y && static_z) {
+        const uint64_t product_size = x_size * y_size * z_size;
+        if (product_size == 0) {
+          return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                 << "WorkgroupSize decorations must not have a static "
+                    "product of zero (X = "
+                 << x_size << ", Y = " << y_size << ", Z = " << z_size << ").";
+        }
+
+        // If there is a known static workgroup size, all entrypoints with
+        // explicit derivative execution modes can be validated. These are only
+        // found in execution models that support explicit workgroup sizes
+        for (const uint32_t entry_point : _.entry_points()) {
+          const auto* modes = _.GetExecutionModes(entry_point);
+          if (!modes) continue;
+          if (modes->count(spv::ExecutionMode::DerivativeGroupQuadsKHR)) {
+            if (x_size % 2 != 0 || y_size % 2 != 0) {
+              return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                     << _.VkErrorID(10151)
+                     << "WorkgroupSize decorations has a static dimensions of "
+                        "(X = "
+                     << x_size << ", Y = " << y_size << ") but Entry Point id "
+                     << entry_point
+                     << " has an DerivativeGroupQuadsKHR execution mode, so "
+                        "both dimensions must be a multiple of 2";
+            }
+          }
+          if (modes->count(spv::ExecutionMode::DerivativeGroupLinearKHR)) {
+            if (product_size % 4 != 0) {
+              return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                     << _.VkErrorID(10152)
+                     << "WorkgroupSize decorations has a static dimensions of "
+                        "(X = "
+                     << x_size << ", Y = " << y_size << ", Z = " << z_size
+                     << ") but Entry Point id " << entry_point
+                     << " has an DerivativeGroupLinearKHR execution mode, so "
+                        "the product ("
+                     << product_size << ") must be a multiple of 4";
+            }
+          }
+        }
+      }
+    }
+  }
+
   // Seed at reference checks with this built-in.
   return ValidateWorkgroupSizeAtReference(decoration, inst, inst, inst);
 }
@@ -3156,20 +3849,38 @@ spv_result_t BuiltInsValidator::ValidateWorkgroupSizeAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelGLCompute &&
-          execution_model != SpvExecutionModelTaskNV &&
-          execution_model != SpvExecutionModelMeshNV) {
+    const spv::StorageClass storage_class =
+        GetStorageClass(referenced_from_inst);
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::GLCompute &&
+          execution_model != spv::ExecutionModel::TaskNV &&
+          execution_model != spv::ExecutionModel::MeshNV &&
+          execution_model != spv::ExecutionModel::TaskEXT &&
+          execution_model != spv::ExecutionModel::MeshEXT) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4425)
                << spvLogStringForEnv(_.context()->target_env)
                << " spec allows BuiltIn "
                << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                decoration.params()[0])
-               << " to be used only with GLCompute, MeshNV, or TaskNV execution model. "
+                                                (uint32_t)decoration.builtin())
+               << " to be used only with GLCompute, MeshNV, TaskNV, MeshEXT or "
+               << "TaskEXT execution model. "
                << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                    referenced_from_inst, execution_model);
       }
+    }
+    if (execution_modes_.count(spv::ExecutionMode::TileShadingRateQCOM) &&
+        storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
+      return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
+             << _.VkErrorID(10635)
+             << spvLogStringForEnv(_.context()->target_env)
+             << " spec allows BuiltIn WorkgroupSize to be only used for "
+                "variables with Input storage class when "
+                "TileShadingRateQCOM Execution Mode is used. "
+             << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
+                                 referenced_from_inst)
+             << " " << GetStorageClassDesc(referenced_from_inst);
     }
   }
 
@@ -3190,14 +3901,15 @@ spv_result_t BuiltInsValidator::ValidateBaseInstanceOrVertexAtDefinition(
             decoration, inst,
             [this, &inst,
              &decoration](const std::string& message) -> spv_result_t {
-              uint32_t vuid = (decoration.params()[0] == SpvBuiltInBaseInstance)
-                                  ? 4183
-                                  : 4186;
+              uint32_t vuid =
+                  (decoration.builtin() == spv::BuiltIn::BaseInstance) ? 4183
+                                                                       : 4186;
               return _.diag(SPV_ERROR_INVALID_DATA, &inst)
                      << _.VkErrorID(vuid)
                      << "According to the Vulkan spec BuiltIn "
-                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      decoration.params()[0])
+                     << _.grammar().lookupOperandName(
+                            SPV_OPERAND_TYPE_BUILT_IN,
+                            (uint32_t)decoration.builtin())
                      << " variable needs to be a 32-bit int scalar. "
                      << message;
             })) {
@@ -3212,12 +3924,12 @@ spv_result_t BuiltInsValidator::ValidateBaseInstanceOrVertexAtReference(
     const Decoration& decoration, const Instruction& built_in_inst,
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
-  uint32_t operand = decoration.params()[0];
+  uint32_t operand = (uint32_t)decoration.builtin();
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
-      uint32_t vuid = (operand == SpvBuiltInBaseInstance) ? 4182 : 4185;
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
+      uint32_t vuid = (spv::BuiltIn(operand) == spv::BuiltIn::BaseInstance) ? 4182 : 4185;
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(vuid) << "Vulkan spec allows BuiltIn "
              << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -3228,9 +3940,9 @@ spv_result_t BuiltInsValidator::ValidateBaseInstanceOrVertexAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelVertex) {
-        uint32_t vuid = (operand == SpvBuiltInBaseInstance) ? 4181 : 4184;
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Vertex) {
+        uint32_t vuid = (spv::BuiltIn(operand) == spv::BuiltIn::BaseInstance) ? 4181 : 4184;
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(vuid) << "Vulkan spec allows BuiltIn "
                << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -3263,8 +3975,9 @@ spv_result_t BuiltInsValidator::ValidateDrawIndexAtDefinition(
               return _.diag(SPV_ERROR_INVALID_DATA, &inst)
                      << _.VkErrorID(4209)
                      << "According to the Vulkan spec BuiltIn "
-                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      decoration.params()[0])
+                     << _.grammar().lookupOperandName(
+                            SPV_OPERAND_TYPE_BUILT_IN,
+                            (uint32_t)decoration.builtin())
                      << " variable needs to be a 32-bit int scalar. "
                      << message;
             })) {
@@ -3279,11 +3992,11 @@ spv_result_t BuiltInsValidator::ValidateDrawIndexAtReference(
     const Decoration& decoration, const Instruction& built_in_inst,
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
-  uint32_t operand = decoration.params()[0];
+  uint32_t operand = (uint32_t)decoration.builtin();
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4208) << "Vulkan spec allows BuiltIn "
              << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -3294,15 +4007,18 @@ spv_result_t BuiltInsValidator::ValidateDrawIndexAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelVertex &&
-          execution_model != SpvExecutionModelMeshNV &&
-          execution_model != SpvExecutionModelTaskNV) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Vertex &&
+          execution_model != spv::ExecutionModel::MeshNV &&
+          execution_model != spv::ExecutionModel::TaskNV &&
+          execution_model != spv::ExecutionModel::MeshEXT &&
+          execution_model != spv::ExecutionModel::TaskEXT) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4207) << "Vulkan spec allows BuiltIn "
                << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
                                                 operand)
-               << " to be used only with Vertex, MeshNV, or TaskNV execution "
+               << " to be used only with Vertex, MeshNV, TaskNV , MeshEXT or"
+               << " TaskEXT execution "
                   "model. "
                << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                    referenced_from_inst, execution_model);
@@ -3330,8 +4046,9 @@ spv_result_t BuiltInsValidator::ValidateViewIndexAtDefinition(
               return _.diag(SPV_ERROR_INVALID_DATA, &inst)
                      << _.VkErrorID(4403)
                      << "According to the Vulkan spec BuiltIn "
-                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      decoration.params()[0])
+                     << _.grammar().lookupOperandName(
+                            SPV_OPERAND_TYPE_BUILT_IN,
+                            (uint32_t)decoration.builtin())
                      << " variable needs to be a 32-bit int scalar. "
                      << message;
             })) {
@@ -3346,11 +4063,11 @@ spv_result_t BuiltInsValidator::ValidateViewIndexAtReference(
     const Decoration& decoration, const Instruction& built_in_inst,
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
-  uint32_t operand = decoration.params()[0];
+  uint32_t operand = (uint32_t)decoration.builtin();
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4402) << "Vulkan spec allows BuiltIn "
              << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -3361,8 +4078,8 @@ spv_result_t BuiltInsValidator::ValidateViewIndexAtReference(
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model == SpvExecutionModelGLCompute) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model == spv::ExecutionModel::GLCompute) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4401) << "Vulkan spec allows BuiltIn "
                << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -3394,8 +4111,9 @@ spv_result_t BuiltInsValidator::ValidateDeviceIndexAtDefinition(
               return _.diag(SPV_ERROR_INVALID_DATA, &inst)
                      << _.VkErrorID(4206)
                      << "According to the Vulkan spec BuiltIn "
-                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      decoration.params()[0])
+                     << _.grammar().lookupOperandName(
+                            SPV_OPERAND_TYPE_BUILT_IN,
+                            (uint32_t)decoration.builtin())
                      << " variable needs to be a 32-bit int scalar. "
                      << message;
             })) {
@@ -3410,11 +4128,11 @@ spv_result_t BuiltInsValidator::ValidateDeviceIndexAtReference(
     const Decoration& decoration, const Instruction& built_in_inst,
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
-  uint32_t operand = decoration.params()[0];
+  uint32_t operand = (uint32_t)decoration.builtin();
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4205) << "Vulkan spec allows BuiltIn "
              << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
@@ -3440,7 +4158,7 @@ spv_result_t BuiltInsValidator::ValidateFragInvocationCountAtDefinition(const De
                                             const Instruction& inst) {
 
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
+    const spv::BuiltIn builtin = decoration.builtin();
     if (spv_result_t error = ValidateI32(
             decoration, inst,
             [this, &inst, &builtin](const std::string& message) -> spv_result_t {
@@ -3450,7 +4168,7 @@ spv_result_t BuiltInsValidator::ValidateFragInvocationCountAtDefinition(const De
                      << spvLogStringForEnv(_.context()->target_env)
                      << " spec BuiltIn "
                      << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      builtin)
+                                                      uint32_t(builtin))
                      << " variable needs to be a 32-bit int scalar. "
                      << message;
             })) {
@@ -3467,29 +4185,29 @@ spv_result_t BuiltInsValidator::ValidateFragInvocationCountAtReference(
     const Instruction& referenced_from_inst) {
 
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::BuiltIn builtin = decoration.builtin();
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(vuid) << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " to be only used for variables with Input storage class. "
              << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                  referenced_from_inst)
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorExecutionModel);
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(vuid)
                << spvLogStringForEnv(_.context()->target_env)
                << " spec allows BuiltIn "
-               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                << " to be used only with Fragment execution model. "
                << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                    referenced_from_inst, execution_model);
@@ -3510,7 +4228,7 @@ spv_result_t BuiltInsValidator::ValidateFragInvocationCountAtReference(
 spv_result_t BuiltInsValidator::ValidateFragSizeAtDefinition(const Decoration& decoration,
                                             const Instruction& inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
+    const spv::BuiltIn builtin = decoration.builtin();
     if (spv_result_t error = ValidateI32Vec(
             decoration, inst, 2,
             [this, &inst, &builtin](const std::string& message) -> spv_result_t {
@@ -3520,7 +4238,7 @@ spv_result_t BuiltInsValidator::ValidateFragSizeAtDefinition(const Decoration& d
                      << spvLogStringForEnv(_.context()->target_env)
                      << " spec BuiltIn "
                      << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      builtin)
+                                                      uint32_t(builtin))
                      << " variable needs to be a 2-component 32-bit int vector. "
                      << message;
             })) {
@@ -3537,29 +4255,29 @@ spv_result_t BuiltInsValidator::ValidateFragSizeAtReference(
     const Instruction& referenced_from_inst) {
 
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::BuiltIn builtin = decoration.builtin();
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(vuid) << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " to be only used for variables with Input storage class. "
              << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                  referenced_from_inst)
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorExecutionModel);
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(vuid)
                << spvLogStringForEnv(_.context()->target_env)
                << " spec allows BuiltIn "
-               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                << " to be used only with Fragment execution model. "
                << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                    referenced_from_inst, execution_model);
@@ -3580,7 +4298,7 @@ spv_result_t BuiltInsValidator::ValidateFragSizeAtReference(
 spv_result_t BuiltInsValidator::ValidateFragStencilRefAtDefinition(const Decoration& decoration,
                                             const Instruction& inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
+    const spv::BuiltIn builtin = decoration.builtin();
     if (spv_result_t error = ValidateI(
             decoration, inst,
             [this, &inst, &builtin](const std::string& message) -> spv_result_t {
@@ -3590,7 +4308,7 @@ spv_result_t BuiltInsValidator::ValidateFragStencilRefAtDefinition(const Decorat
                      << spvLogStringForEnv(_.context()->target_env)
                      << " spec BuiltIn "
                      << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      builtin)
+                                                      uint32_t(builtin))
                      << " variable needs to be a int scalar. "
                      << message;
             })) {
@@ -3607,29 +4325,29 @@ spv_result_t BuiltInsValidator::ValidateFragStencilRefAtReference(
     const Instruction& referenced_from_inst) {
 
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassOutput) {
+    const spv::BuiltIn builtin = decoration.builtin();
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Output) {
       uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(vuid) << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " to be only used for variables with Output storage class. "
              << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                  referenced_from_inst)
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorExecutionModel);
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(vuid)
                << spvLogStringForEnv(_.context()->target_env)
                << " spec allows BuiltIn "
-               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                << " to be used only with Fragment execution model. "
                << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                    referenced_from_inst, execution_model);
@@ -3650,7 +4368,7 @@ spv_result_t BuiltInsValidator::ValidateFragStencilRefAtReference(
 spv_result_t BuiltInsValidator::ValidateFullyCoveredAtDefinition(const Decoration& decoration,
                                                const Instruction& inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
+    const spv::BuiltIn builtin = decoration.builtin();
     if (spv_result_t error = ValidateBool(
             decoration, inst,
             [this, &inst, &builtin](const std::string& message) -> spv_result_t {
@@ -3660,7 +4378,7 @@ spv_result_t BuiltInsValidator::ValidateFullyCoveredAtDefinition(const Decoratio
                      << spvLogStringForEnv(_.context()->target_env)
                      << " spec BuiltIn "
                      << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      builtin)
+                                                      uint32_t(builtin))
                      << " variable needs to be a bool scalar. "
                      << message;
             })) {
@@ -3677,29 +4395,29 @@ spv_result_t BuiltInsValidator::ValidateFullyCoveredAtReference(
     const Instruction& referenced_from_inst) {
 
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::BuiltIn builtin = decoration.builtin();
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(vuid) << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn "
-             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
              << " to be only used for variables with Input storage class. "
              << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                  referenced_from_inst)
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorExecutionModel);
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(vuid)
                << spvLogStringForEnv(_.context()->target_env)
                << " spec allows BuiltIn "
-               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, builtin)
+               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                << " to be used only with Fragment execution model. "
                << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                    referenced_from_inst, execution_model);
@@ -3717,7 +4435,7 @@ spv_result_t BuiltInsValidator::ValidateFullyCoveredAtReference(
   return SPV_SUCCESS;
 }
 
-spv_result_t BuiltInsValidator::ValidateSMBuiltinsAtDefinition(
+spv_result_t BuiltInsValidator::ValidateNVSMOrARMCoreBuiltinsAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
     if (spv_result_t error = ValidateI32(
@@ -3728,8 +4446,9 @@ spv_result_t BuiltInsValidator::ValidateSMBuiltinsAtDefinition(
                      << "According to the "
                      << spvLogStringForEnv(_.context()->target_env)
                      << " spec BuiltIn "
-                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      decoration.params()[0])
+                     << _.grammar().lookupOperandName(
+                            SPV_OPERAND_TYPE_BUILT_IN,
+                            (uint32_t)decoration.builtin())
                      << " variable needs to be a 32-bit int scalar. "
                      << message;
             })) {
@@ -3738,22 +4457,22 @@ spv_result_t BuiltInsValidator::ValidateSMBuiltinsAtDefinition(
   }
 
   // Seed at reference checks with this built-in.
-  return ValidateSMBuiltinsAtReference(decoration, inst, inst, inst);
+  return ValidateNVSMOrARMCoreBuiltinsAtReference(decoration, inst, inst, inst);
 }
 
-spv_result_t BuiltInsValidator::ValidateSMBuiltinsAtReference(
+spv_result_t BuiltInsValidator::ValidateNVSMOrARMCoreBuiltinsAtReference(
     const Decoration& decoration, const Instruction& built_in_inst,
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << spvLogStringForEnv(_.context()->target_env)
              << " spec allows BuiltIn "
              << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                              decoration.params()[0])
+                                              (uint32_t)decoration.builtin())
              << " to be only used for "
                 "variables with Input storage class. "
              << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
@@ -3765,7 +4484,7 @@ spv_result_t BuiltInsValidator::ValidateSMBuiltinsAtReference(
   if (function_id_ == 0) {
     // Propagate this rule to all dependant ids in the global scope.
     id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
-        &BuiltInsValidator::ValidateSMBuiltinsAtReference, this, decoration,
+        &BuiltInsValidator::ValidateNVSMOrARMCoreBuiltinsAtReference, this, decoration,
         built_in_inst, referenced_from_inst, std::placeholders::_1));
   }
 
@@ -3774,24 +4493,6 @@ spv_result_t BuiltInsValidator::ValidateSMBuiltinsAtReference(
 
 spv_result_t BuiltInsValidator::ValidatePrimitiveShadingRateAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
-  if (spvIsVulkanEnv(_.context()->target_env)) {
-    if (spv_result_t error = ValidateI32(
-            decoration, inst,
-            [this, &inst,
-             &decoration](const std::string& message) -> spv_result_t {
-              return _.diag(SPV_ERROR_INVALID_DATA, &inst)
-                     << _.VkErrorID(4486)
-                     << "According to the Vulkan spec BuiltIn "
-                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      decoration.params()[0])
-                     << " variable needs to be a 32-bit int scalar. "
-                     << message;
-            })) {
-      return error;
-    }
-  }
-
-  // Seed at reference checks with this built-in.
   return ValidatePrimitiveShadingRateAtReference(decoration, inst, inst, inst);
 }
 
@@ -3800,31 +4501,41 @@ spv_result_t BuiltInsValidator::ValidatePrimitiveShadingRateAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassOutput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Output) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4485) << "Vulkan spec allows BuiltIn "
              << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                              decoration.params()[0])
+                                              (uint32_t)decoration.builtin())
              << " to be only used for variables with Output storage class. "
              << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                  referenced_from_inst)
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
+    id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
+        &BuiltInsValidator::ValidateMeshBuiltinInterfaceRules, this, decoration,
+        built_in_inst, spv::Op::OpTypeInt, std::placeholders::_1));
+
+    id_to_at_reference_checks_[referenced_from_inst.id()].push_back(std::bind(
+        &BuiltInsValidator::ValidatePrimitiveShadingRateInterfaceRules, this,
+        decoration, built_in_inst, std::placeholders::_1));
+
+    for (const spv::ExecutionModel execution_model : execution_models_) {
       switch (execution_model) {
-        case SpvExecutionModelVertex:
-        case SpvExecutionModelGeometry:
-        case SpvExecutionModelMeshNV:
+        case spv::ExecutionModel::Vertex:
+        case spv::ExecutionModel::Geometry:
+        case spv::ExecutionModel::MeshNV:
+        case spv::ExecutionModel::MeshEXT:
           break;
         default: {
           return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                  << _.VkErrorID(4484) << "Vulkan spec allows BuiltIn "
-                 << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                  decoration.params()[0])
-                 << " to be used only with Vertex, Geometry, or MeshNV "
+                 << _.grammar().lookupOperandName(
+                        SPV_OPERAND_TYPE_BUILT_IN,
+                        (uint32_t)decoration.builtin())
+                 << " to be used only with Vertex, Geometry, MeshNV or MeshEXT "
                     "execution models. "
                  << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                      referenced_from_inst, execution_model);
@@ -3854,8 +4565,9 @@ spv_result_t BuiltInsValidator::ValidateShadingRateAtDefinition(
               return _.diag(SPV_ERROR_INVALID_DATA, &inst)
                      << _.VkErrorID(4492)
                      << "According to the Vulkan spec BuiltIn "
-                     << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                      decoration.params()[0])
+                     << _.grammar().lookupOperandName(
+                            SPV_OPERAND_TYPE_BUILT_IN,
+                            (uint32_t)decoration.builtin())
                      << " variable needs to be a 32-bit int scalar. "
                      << message;
             })) {
@@ -3872,25 +4584,25 @@ spv_result_t BuiltInsValidator::ValidateShadingRateAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(4491) << "Vulkan spec allows BuiltIn "
              << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                              decoration.params()[0])
+                                              (uint32_t)decoration.builtin())
              << " to be only used for variables with Input storage class. "
              << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                  referenced_from_inst)
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
-      if (execution_model != SpvExecutionModelFragment) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::Fragment) {
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(4490) << "Vulkan spec allows BuiltIn "
                << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                decoration.params()[0])
+                                                (uint32_t)decoration.builtin())
                << " to be used only with the Fragment execution model. "
                << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                    referenced_from_inst, execution_model);
@@ -3908,14 +4620,26 @@ spv_result_t BuiltInsValidator::ValidateShadingRateAtReference(
   return SPV_SUCCESS;
 }
 
+spv_result_t BuiltInsValidator::ValidateDescriptorHeapAtDefinition(
+    const Decoration& decoration, const Instruction& inst) {
+  if (decoration.struct_member_index() != Decoration::kInvalidMember) {
+    return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+           << "BuiltIn "
+           << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
+                                            (uint32_t)decoration.builtin())
+           << " cannot be used as a member decoration ";
+  }
+  return SPV_SUCCESS;
+}
+
 spv_result_t BuiltInsValidator::ValidateRayTracingBuiltinsAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
+    const spv::BuiltIn builtin = decoration.builtin();
     switch (builtin) {
-      case SpvBuiltInHitTNV:
-      case SpvBuiltInRayTminKHR:
-      case SpvBuiltInRayTmaxKHR:
+      case spv::BuiltIn::HitTNV:
+      case spv::BuiltIn::RayTminKHR:
+      case spv::BuiltIn::RayTmaxKHR:
         // f32 scalar
         if (spv_result_t error = ValidateF32(
                 decoration, inst,
@@ -3926,19 +4650,19 @@ spv_result_t BuiltInsValidator::ValidateRayTracingBuiltinsAtDefinition(
                          << _.VkErrorID(vuid)
                          << "According to the Vulkan spec BuiltIn "
                          << _.grammar().lookupOperandName(
-                                SPV_OPERAND_TYPE_BUILT_IN, builtin)
+                                SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                          << " variable needs to be a 32-bit float scalar. "
                          << message;
                 })) {
           return error;
         }
         break;
-      case SpvBuiltInHitKindKHR:
-      case SpvBuiltInInstanceCustomIndexKHR:
-      case SpvBuiltInInstanceId:
-      case SpvBuiltInRayGeometryIndexKHR:
-      case SpvBuiltInIncomingRayFlagsKHR:
-      case SpvBuiltInCullMaskKHR:
+      case spv::BuiltIn::HitKindKHR:
+      case spv::BuiltIn::InstanceCustomIndexKHR:
+      case spv::BuiltIn::InstanceId:
+      case spv::BuiltIn::RayGeometryIndexKHR:
+      case spv::BuiltIn::IncomingRayFlagsKHR:
+      case spv::BuiltIn::CullMaskKHR:
         // i32 scalar
         if (spv_result_t error = ValidateI32(
                 decoration, inst,
@@ -3949,17 +4673,17 @@ spv_result_t BuiltInsValidator::ValidateRayTracingBuiltinsAtDefinition(
                          << _.VkErrorID(vuid)
                          << "According to the Vulkan spec BuiltIn "
                          << _.grammar().lookupOperandName(
-                                SPV_OPERAND_TYPE_BUILT_IN, builtin)
+                                SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                          << " variable needs to be a 32-bit int scalar. "
                          << message;
                 })) {
           return error;
         }
         break;
-      case SpvBuiltInObjectRayDirectionKHR:
-      case SpvBuiltInObjectRayOriginKHR:
-      case SpvBuiltInWorldRayDirectionKHR:
-      case SpvBuiltInWorldRayOriginKHR:
+      case spv::BuiltIn::ObjectRayDirectionKHR:
+      case spv::BuiltIn::ObjectRayOriginKHR:
+      case spv::BuiltIn::WorldRayDirectionKHR:
+      case spv::BuiltIn::WorldRayOriginKHR:
         // f32 vec3
         if (spv_result_t error = ValidateF32Vec(
                 decoration, inst, 3,
@@ -3970,7 +4694,7 @@ spv_result_t BuiltInsValidator::ValidateRayTracingBuiltinsAtDefinition(
                          << _.VkErrorID(vuid)
                          << "According to the Vulkan spec BuiltIn "
                          << _.grammar().lookupOperandName(
-                                SPV_OPERAND_TYPE_BUILT_IN, builtin)
+                                SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                          << " variable needs to be a 3-component 32-bit float "
                             "vector. "
                          << message;
@@ -3978,8 +4702,8 @@ spv_result_t BuiltInsValidator::ValidateRayTracingBuiltinsAtDefinition(
           return error;
         }
         break;
-      case SpvBuiltInLaunchIdKHR:
-      case SpvBuiltInLaunchSizeKHR:
+      case spv::BuiltIn::LaunchIdKHR:
+      case spv::BuiltIn::LaunchSizeKHR:
         // i32 vec3
         if (spv_result_t error = ValidateI32Vec(
                 decoration, inst, 3,
@@ -3990,7 +4714,7 @@ spv_result_t BuiltInsValidator::ValidateRayTracingBuiltinsAtDefinition(
                          << _.VkErrorID(vuid)
                          << "According to the Vulkan spec BuiltIn "
                          << _.grammar().lookupOperandName(
-                                SPV_OPERAND_TYPE_BUILT_IN, builtin)
+                                SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                          << " variable needs to be a 3-component 32-bit int "
                             "vector. "
                          << message;
@@ -3998,8 +4722,8 @@ spv_result_t BuiltInsValidator::ValidateRayTracingBuiltinsAtDefinition(
           return error;
         }
         break;
-      case SpvBuiltInObjectToWorldKHR:
-      case SpvBuiltInWorldToObjectKHR:
+      case spv::BuiltIn::ObjectToWorldKHR:
+      case spv::BuiltIn::WorldToObjectKHR:
         // f32 mat4x3
         if (spv_result_t error = ValidateF32Mat(
                 decoration, inst, 3, 4,
@@ -4010,10 +4734,29 @@ spv_result_t BuiltInsValidator::ValidateRayTracingBuiltinsAtDefinition(
                          << _.VkErrorID(vuid)
                          << "According to the Vulkan spec BuiltIn "
                          << _.grammar().lookupOperandName(
-                                SPV_OPERAND_TYPE_BUILT_IN, builtin)
+                                SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
                          << " variable needs to be a matrix with"
                          << " 4 columns of 3-component vectors of 32-bit "
                             "floats. "
+                         << message;
+                })) {
+          return error;
+        }
+        break;
+      case spv::BuiltIn::HitTriangleVertexPositionsKHR:
+        // array[3] of f32 vec3
+        if (spv_result_t error = ValidateArrayedF32Vec(
+                decoration, inst, 3, 3,
+                [this, &inst,
+                 builtin](const std::string& message) -> spv_result_t {
+                  uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorType);
+                  return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                         << _.VkErrorID(vuid)
+                         << "According to the Vulkan spec BuiltIn "
+                         << _.grammar().lookupOperandName(
+                                SPV_OPERAND_TYPE_BUILT_IN, uint32_t(builtin))
+                         << " variable needs to be an array of 3, 32-bit float "
+                            "3-component vectors. "
                          << message;
                 })) {
           return error;
@@ -4034,31 +4777,32 @@ spv_result_t BuiltInsValidator::ValidateRayTracingBuiltinsAtReference(
     const Instruction& referenced_inst,
     const Instruction& referenced_from_inst) {
   if (spvIsVulkanEnv(_.context()->target_env)) {
-    const SpvBuiltIn builtin = SpvBuiltIn(decoration.params()[0]);
-    const SpvStorageClass storage_class = GetStorageClass(referenced_from_inst);
-    if (storage_class != SpvStorageClassMax &&
-        storage_class != SpvStorageClassInput) {
+    const spv::BuiltIn builtin = decoration.builtin();
+    const spv::StorageClass storage_class = GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Input) {
       uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
       return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
              << _.VkErrorID(vuid) << "Vulkan spec allows BuiltIn "
              << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                              decoration.params()[0])
+                                              (uint32_t)decoration.builtin())
              << " to be only used for variables with Input storage class. "
              << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                  referenced_from_inst)
              << " " << GetStorageClassDesc(referenced_from_inst);
     }
 
-    for (const SpvExecutionModel execution_model : execution_models_) {
+    for (const spv::ExecutionModel execution_model : execution_models_) {
       if (!IsExecutionModelValidForRtBuiltIn(builtin, execution_model)) {
         uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorExecutionModel);
         return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
                << _.VkErrorID(vuid) << "Vulkan spec does not allow BuiltIn "
                << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
-                                                decoration.params()[0])
+                                                (uint32_t)decoration.builtin())
                << " to be used with the execution model "
                << _.grammar().lookupOperandName(
-                      SPV_OPERAND_TYPE_EXECUTION_MODEL, execution_model)
+                      SPV_OPERAND_TYPE_EXECUTION_MODEL,
+                      uint32_t(execution_model))
                << ".\n"
                << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
                                    referenced_from_inst, execution_model);
@@ -4077,214 +4821,430 @@ spv_result_t BuiltInsValidator::ValidateRayTracingBuiltinsAtReference(
   return SPV_SUCCESS;
 }
 
-spv_result_t BuiltInsValidator::ValidateSingleBuiltInAtDefinition(
+spv_result_t BuiltInsValidator::ValidateMeshShadingEXTBuiltinsAtDefinition(
     const Decoration& decoration, const Instruction& inst) {
-  const SpvBuiltIn label = SpvBuiltIn(decoration.params()[0]);
+  if (spvIsVulkanEnv(_.context()->target_env)) {
+    const spv::BuiltIn builtin = decoration.builtin();
+    uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorType);
+    switch (builtin) {
+      case spv::BuiltIn::PrimitivePointIndicesEXT:
+        if (spv_result_t error = ValidateI32Arr(
+                decoration, inst,
+                [this, &inst, &decoration,
+                 &vuid](const std::string& message) -> spv_result_t {
+                  return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                         << _.VkErrorID(vuid) << "According to the "
+                         << spvLogStringForEnv(_.context()->target_env)
+                         << " spec BuiltIn "
+                         << _.grammar().lookupOperandName(
+                                SPV_OPERAND_TYPE_BUILT_IN,
+                                (uint32_t)decoration.builtin())
+                         << " variable needs to be a 32-bit int array."
+                         << message;
+                })) {
+          return error;
+        }
+        break;
+      case spv::BuiltIn::PrimitiveLineIndicesEXT:
+        if (spv_result_t error = ValidateArrayedI32Vec(
+                decoration, inst, 2,
+                [this, &inst, &decoration,
+                 &vuid](const std::string& message) -> spv_result_t {
+                  return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                         << _.VkErrorID(vuid) << "According to the "
+                         << spvLogStringForEnv(_.context()->target_env)
+                         << " spec BuiltIn "
+                         << _.grammar().lookupOperandName(
+                                SPV_OPERAND_TYPE_BUILT_IN,
+                                (uint32_t)decoration.builtin())
+                         << " variable needs to be a 2-component 32-bit int "
+                            "array."
+                         << message;
+                })) {
+          return error;
+        }
+        break;
+      case spv::BuiltIn::PrimitiveTriangleIndicesEXT:
+        if (spv_result_t error = ValidateArrayedI32Vec(
+                decoration, inst, 3,
+                [this, &inst, &decoration,
+                 &vuid](const std::string& message) -> spv_result_t {
+                  return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                         << _.VkErrorID(vuid) << "According to the "
+                         << spvLogStringForEnv(_.context()->target_env)
+                         << " spec BuiltIn "
+                         << _.grammar().lookupOperandName(
+                                SPV_OPERAND_TYPE_BUILT_IN,
+                                (uint32_t)decoration.builtin())
+                         << " variable needs to be a 3-component 32-bit int "
+                            "array."
+                         << message;
+                })) {
+          return error;
+        }
+        break;
+      case spv::BuiltIn::CullPrimitiveEXT: {
+        for (const uint32_t entry_point : _.entry_points()) {
+          auto* models = _.GetExecutionModels(entry_point);
+          if (models->find(spv::ExecutionModel::MeshEXT) == models->end() &&
+              models->find(spv::ExecutionModel::MeshNV) == models->end()) {
+            continue;
+          }
 
-  if (!spvIsVulkanEnv(_.context()->target_env)) {
-    // Early return. All currently implemented rules are based on Vulkan spec.
-    //
-    // TODO: If you are adding validation rules for environments other than
-    // Vulkan (or general rules which are not environment independent), then
-    // you need to modify or remove this condition. Consider also adding early
-    // returns into BuiltIn-specific rules, so that the system doesn't spawn new
-    // rules which don't do anything.
-    return SPV_SUCCESS;
+          if (IsBulitinInEntryPoint(inst, entry_point)) {
+            if (cull_primitive_entry_points_.find(entry_point) !=
+                cull_primitive_entry_points_.end()) {
+              return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                     << _.VkErrorID(10591)
+                     << "There must be only one declaration of the "
+                        "CullPrimitiveEXT associated in entry point's "
+                        "interface. "
+                     << GetIdDesc(*_.FindDef(entry_point));
+            } else {
+              cull_primitive_entry_points_.insert(entry_point);
+            }
+          }
+        }
+
+        break;
+      }
+      default:
+        assert(0 && "Unexpected mesh EXT builtin");
+    }
+
+    // - We know this only allowed for Mesh Execution Model.
+    // - The Scalar type is is boolean for CullPrimitiveEXT, the other 3 builtin
+    // (topology) don't need this type.
+    // - It is possible to have multiple mesh
+    // shaders (https://github.com/KhronosGroup/SPIRV-Tools/issues/6320) and we
+    // need to validate these at reference time.
+    if (spv_result_t error = ValidateMeshBuiltinInterfaceRules(
+            decoration, inst, spv::Op::OpTypeBool, inst)) {
+      return error;
+    }
   }
 
+  // Seed at reference checks with this built-in.
+  return ValidateMeshShadingEXTBuiltinsAtReference(decoration, inst, inst,
+                                                   inst);
+}
+
+spv_result_t BuiltInsValidator::ValidateMeshShadingEXTBuiltinsAtReference(
+    const Decoration& decoration, const Instruction& built_in_inst,
+    const Instruction& referenced_inst,
+    const Instruction& referenced_from_inst) {
+  if (spvIsVulkanEnv(_.context()->target_env)) {
+    const spv::BuiltIn builtin = decoration.builtin();
+    const spv::StorageClass storage_class =
+        GetStorageClass(referenced_from_inst);
+    if (storage_class != spv::StorageClass::Max &&
+        storage_class != spv::StorageClass::Output) {
+      uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
+      return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
+             << _.VkErrorID(vuid) << spvLogStringForEnv(_.context()->target_env)
+             << " spec allows BuiltIn "
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
+                                              uint32_t(builtin))
+             << " to be only used for variables with Output storage class. "
+             << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
+                                 referenced_from_inst)
+             << " " << GetStorageClassDesc(referenced_from_inst);
+    }
+    for (const spv::ExecutionModel execution_model : execution_models_) {
+      if (execution_model != spv::ExecutionModel::MeshEXT) {
+        uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorExecutionModel);
+        return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
+               << _.VkErrorID(vuid)
+               << spvLogStringForEnv(_.context()->target_env)
+               << " spec allows BuiltIn "
+               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
+                                                uint32_t(builtin))
+               << " to be used only with MeshEXT execution model. "
+               << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
+                                   referenced_from_inst, execution_model);
+      }
+    }
+  }
+
+  if (function_id_ == 0) {
+    // Propagate this rule to all dependant ids in the global scope.
+    id_to_at_reference_checks_[referenced_from_inst.id()].push_back(
+        std::bind(&BuiltInsValidator::ValidateMeshShadingEXTBuiltinsAtReference,
+                  this, decoration, built_in_inst, referenced_from_inst,
+                  std::placeholders::_1));
+  }
+
+  return SPV_SUCCESS;
+}
+
+spv_result_t BuiltInsValidator::ValidateTileQCOMBuiltinAtDefinition(
+    const Decoration& decoration, const Instruction& inst) {
+  const spv::BuiltIn builtin = decoration.builtin();
+  const uint32_t num_components =
+      (builtin == spv::BuiltIn::TileDimensionQCOM) ? 3 : 2;
+  if (spv_result_t error = ValidateU32Vec(
+          decoration, inst, num_components,
+          [this, &inst, builtin,
+           num_components](const std::string& msg) -> spv_result_t {
+            uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorType);
+            return _.diag(SPV_ERROR_INVALID_DATA, &inst)
+                   << _.VkErrorID(vuid)
+                   << "According to the Vulkan spec BuiltIn "
+                   << _.grammar().lookupOperandName(
+                          SPV_OPERAND_TYPE_BUILT_IN,
+                          static_cast<uint32_t>(builtin))
+                   << " variable must be a " << num_components
+                   << "-component 32-bit unsigned int vector. " << msg;
+          })) {
+    return error;
+  }
+
+  return ValidateTileQCOMBuiltinAtReference(decoration, inst, inst, inst);
+}
+
+spv_result_t BuiltInsValidator::ValidateTileQCOMBuiltinAtReference(
+    const Decoration& decoration, const Instruction& built_in_inst,
+    const Instruction& referenced_inst,
+    const Instruction& referenced_from_inst) {
+  if (spvIsVulkanEnv(_.context()->target_env)) {
+    const spv::BuiltIn builtin = decoration.builtin();
+    const spv::StorageClass sc = GetStorageClass(referenced_from_inst);
+    if (sc != spv::StorageClass::Max && sc != spv::StorageClass::Input) {
+      uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorStorageClass);
+      return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
+             << _.VkErrorID(vuid) << "Vulkan spec allows BuiltIn "
+             << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
+                                              static_cast<uint32_t>(builtin))
+             << " to be only used for variables with Input storage class. "
+             << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
+                                 referenced_from_inst)
+             << " " << GetStorageClassDesc(referenced_from_inst);
+    }
+
+    for (const spv::ExecutionModel model : execution_models_) {
+      if (model != spv::ExecutionModel::Fragment &&
+          model != spv::ExecutionModel::GLCompute) {
+        uint32_t vuid = GetVUIDForBuiltin(builtin, VUIDErrorExecutionModel);
+        return _.diag(SPV_ERROR_INVALID_DATA, &referenced_from_inst)
+               << _.VkErrorID(vuid) << "Vulkan spec allows BuiltIn "
+               << _.grammar().lookupOperandName(SPV_OPERAND_TYPE_BUILT_IN,
+                                                static_cast<uint32_t>(builtin))
+               << " to be used only with Fragment or GLCompute execution "
+                  "model. "
+               << GetReferenceDesc(decoration, built_in_inst, referenced_inst,
+                                   referenced_from_inst, model);
+      }
+    }
+  }
+
+  if (function_id_ == 0) {
+    id_to_at_reference_checks_[referenced_from_inst.id()].push_back(
+        std::bind(&BuiltInsValidator::ValidateTileQCOMBuiltinAtReference, this,
+                  decoration, built_in_inst, referenced_from_inst,
+                  std::placeholders::_1));
+  }
+
+  return SPV_SUCCESS;
+}
+
+spv_result_t BuiltInsValidator::ValidateSingleBuiltInAtDefinition(
+    const Decoration& decoration, const Instruction& inst) {
+  const spv::BuiltIn label = decoration.builtin();
+  // Universial checks
+  if (label == spv::BuiltIn::WorkgroupSize) {
+    return ValidateWorkgroupSizeAtDefinition(decoration, inst);
+  }
+
+  if (spvIsVulkanEnv(_.context()->target_env)) {
+    return ValidateSingleBuiltInAtDefinitionVulkan(decoration, inst, label);
+  }
+  return SPV_SUCCESS;
+}
+
+spv_result_t BuiltInsValidator::ValidateSingleBuiltInAtDefinitionVulkan(
+    const Decoration& decoration, const Instruction& inst,
+    const spv::BuiltIn label) {
   // If you are adding a new BuiltIn enum, please register it here.
   // If the newly added enum has validation rules associated with it
   // consider leaving a TODO and/or creating an issue.
   switch (label) {
-    case SpvBuiltInClipDistance:
-    case SpvBuiltInCullDistance: {
+    case spv::BuiltIn::ClipDistance:
+    case spv::BuiltIn::CullDistance: {
       return ValidateClipOrCullDistanceAtDefinition(decoration, inst);
     }
-    case SpvBuiltInFragCoord: {
+    case spv::BuiltIn::FragCoord: {
       return ValidateFragCoordAtDefinition(decoration, inst);
     }
-    case SpvBuiltInFragDepth: {
+    case spv::BuiltIn::FragDepth: {
       return ValidateFragDepthAtDefinition(decoration, inst);
     }
-    case SpvBuiltInFrontFacing: {
+    case spv::BuiltIn::FrontFacing: {
       return ValidateFrontFacingAtDefinition(decoration, inst);
     }
-    case SpvBuiltInGlobalInvocationId:
-    case SpvBuiltInLocalInvocationId:
-    case SpvBuiltInNumWorkgroups:
-    case SpvBuiltInWorkgroupId: {
+    case spv::BuiltIn::GlobalInvocationId:
+    case spv::BuiltIn::LocalInvocationId:
+    case spv::BuiltIn::NumWorkgroups:
+    case spv::BuiltIn::WorkgroupId: {
       return ValidateComputeShaderI32Vec3InputAtDefinition(decoration, inst);
     }
-    case SpvBuiltInBaryCoordKHR:
-    case SpvBuiltInBaryCoordNoPerspKHR: {
+    case spv::BuiltIn::BaryCoordKHR:
+    case spv::BuiltIn::BaryCoordNoPerspKHR: {
       return ValidateFragmentShaderF32Vec3InputAtDefinition(decoration, inst);
     }
-    case SpvBuiltInHelperInvocation: {
+    case spv::BuiltIn::HelperInvocation: {
       return ValidateHelperInvocationAtDefinition(decoration, inst);
     }
-    case SpvBuiltInInvocationId: {
+    case spv::BuiltIn::InvocationId: {
       return ValidateInvocationIdAtDefinition(decoration, inst);
     }
-    case SpvBuiltInInstanceIndex: {
+    case spv::BuiltIn::InstanceIndex: {
       return ValidateInstanceIndexAtDefinition(decoration, inst);
     }
-    case SpvBuiltInLayer:
-    case SpvBuiltInViewportIndex: {
+    case spv::BuiltIn::Layer:
+    case spv::BuiltIn::ViewportIndex: {
       return ValidateLayerOrViewportIndexAtDefinition(decoration, inst);
     }
-    case SpvBuiltInPatchVertices: {
+    case spv::BuiltIn::PatchVertices: {
       return ValidatePatchVerticesAtDefinition(decoration, inst);
     }
-    case SpvBuiltInPointCoord: {
+    case spv::BuiltIn::PointCoord: {
       return ValidatePointCoordAtDefinition(decoration, inst);
     }
-    case SpvBuiltInPointSize: {
+    case spv::BuiltIn::PointSize: {
       return ValidatePointSizeAtDefinition(decoration, inst);
     }
-    case SpvBuiltInPosition: {
+    case spv::BuiltIn::Position: {
       return ValidatePositionAtDefinition(decoration, inst);
     }
-    case SpvBuiltInPrimitiveId: {
+    case spv::BuiltIn::PrimitiveId: {
       return ValidatePrimitiveIdAtDefinition(decoration, inst);
     }
-    case SpvBuiltInSampleId: {
+    case spv::BuiltIn::SampleId: {
       return ValidateSampleIdAtDefinition(decoration, inst);
     }
-    case SpvBuiltInSampleMask: {
+    case spv::BuiltIn::SampleMask: {
       return ValidateSampleMaskAtDefinition(decoration, inst);
     }
-    case SpvBuiltInSamplePosition: {
+    case spv::BuiltIn::SamplePosition: {
       return ValidateSamplePositionAtDefinition(decoration, inst);
     }
-    case SpvBuiltInSubgroupId:
-    case SpvBuiltInNumSubgroups: {
+    case spv::BuiltIn::SubgroupId:
+    case spv::BuiltIn::NumSubgroups: {
       return ValidateComputeI32InputAtDefinition(decoration, inst);
     }
-    case SpvBuiltInSubgroupLocalInvocationId:
-    case SpvBuiltInSubgroupSize: {
+    case spv::BuiltIn::SubgroupLocalInvocationId:
+    case spv::BuiltIn::SubgroupSize: {
       return ValidateI32InputAtDefinition(decoration, inst);
     }
-    case SpvBuiltInSubgroupEqMask:
-    case SpvBuiltInSubgroupGeMask:
-    case SpvBuiltInSubgroupGtMask:
-    case SpvBuiltInSubgroupLeMask:
-    case SpvBuiltInSubgroupLtMask: {
+    case spv::BuiltIn::SubgroupEqMask:
+    case spv::BuiltIn::SubgroupGeMask:
+    case spv::BuiltIn::SubgroupGtMask:
+    case spv::BuiltIn::SubgroupLeMask:
+    case spv::BuiltIn::SubgroupLtMask: {
       return ValidateI32Vec4InputAtDefinition(decoration, inst);
     }
-    case SpvBuiltInTessCoord: {
+    case spv::BuiltIn::TessCoord: {
       return ValidateTessCoordAtDefinition(decoration, inst);
     }
-    case SpvBuiltInTessLevelOuter: {
+    case spv::BuiltIn::TessLevelOuter: {
       return ValidateTessLevelOuterAtDefinition(decoration, inst);
     }
-    case SpvBuiltInTessLevelInner: {
+    case spv::BuiltIn::TessLevelInner: {
       return ValidateTessLevelInnerAtDefinition(decoration, inst);
     }
-    case SpvBuiltInVertexIndex: {
+    case spv::BuiltIn::VertexIndex: {
       return ValidateVertexIndexAtDefinition(decoration, inst);
     }
-    case SpvBuiltInWorkgroupSize: {
-      return ValidateWorkgroupSizeAtDefinition(decoration, inst);
-    }
-    case SpvBuiltInVertexId: {
+    case spv::BuiltIn::VertexId: {
       return ValidateVertexIdAtDefinition(decoration, inst);
     }
-    case SpvBuiltInLocalInvocationIndex: {
+    case spv::BuiltIn::LocalInvocationIndex: {
       return ValidateLocalInvocationIndexAtDefinition(decoration, inst);
     }
-    case SpvBuiltInWarpsPerSMNV:
-    case SpvBuiltInSMCountNV:
-    case SpvBuiltInWarpIDNV:
-    case SpvBuiltInSMIDNV: {
-      return ValidateSMBuiltinsAtDefinition(decoration, inst);
+    case spv::BuiltIn::CoreIDARM:
+    case spv::BuiltIn::CoreCountARM:
+    case spv::BuiltIn::CoreMaxIDARM:
+    case spv::BuiltIn::WarpIDARM:
+    case spv::BuiltIn::WarpMaxIDARM:
+    case spv::BuiltIn::WarpsPerSMNV:
+    case spv::BuiltIn::SMCountNV:
+    case spv::BuiltIn::WarpIDNV:
+    case spv::BuiltIn::SMIDNV: {
+      return ValidateNVSMOrARMCoreBuiltinsAtDefinition(decoration, inst);
     }
-    case SpvBuiltInBaseInstance:
-    case SpvBuiltInBaseVertex: {
+    case spv::BuiltIn::BaseInstance:
+    case spv::BuiltIn::BaseVertex: {
       return ValidateBaseInstanceOrVertexAtDefinition(decoration, inst);
     }
-    case SpvBuiltInDrawIndex: {
+    case spv::BuiltIn::DrawIndex: {
       return ValidateDrawIndexAtDefinition(decoration, inst);
     }
-    case SpvBuiltInViewIndex: {
+    case spv::BuiltIn::ViewIndex: {
       return ValidateViewIndexAtDefinition(decoration, inst);
     }
-    case SpvBuiltInDeviceIndex: {
+    case spv::BuiltIn::DeviceIndex: {
       return ValidateDeviceIndexAtDefinition(decoration, inst);
     }
-    case SpvBuiltInFragInvocationCountEXT: {
-      // alias SpvBuiltInInvocationsPerPixelNV
+    case spv::BuiltIn::FragInvocationCountEXT: {
+      // alias spv::BuiltIn::InvocationsPerPixelNV
       return ValidateFragInvocationCountAtDefinition(decoration, inst);
     }
-    case SpvBuiltInFragSizeEXT: {
-      // alias SpvBuiltInFragmentSizeNV
+    case spv::BuiltIn::FragSizeEXT: {
+      // alias spv::BuiltIn::FragmentSizeNV
       return ValidateFragSizeAtDefinition(decoration, inst);
     }
-    case SpvBuiltInFragStencilRefEXT: {
+    case spv::BuiltIn::FragStencilRefEXT: {
       return ValidateFragStencilRefAtDefinition(decoration, inst);
     }
-    case SpvBuiltInFullyCoveredEXT:{
+    case spv::BuiltIn::FullyCoveredEXT:{
       return ValidateFullyCoveredAtDefinition(decoration, inst);
     }
     // Ray tracing builtins
-    case SpvBuiltInHitKindKHR:  // alias SpvBuiltInHitKindNV
-    case SpvBuiltInHitTNV:      // NOT present in KHR
-    case SpvBuiltInInstanceId:
-    case SpvBuiltInLaunchIdKHR:           // alias SpvBuiltInLaunchIdNV
-    case SpvBuiltInLaunchSizeKHR:         // alias SpvBuiltInLaunchSizeNV
-    case SpvBuiltInWorldRayOriginKHR:     // alias SpvBuiltInWorldRayOriginNV
-    case SpvBuiltInWorldRayDirectionKHR:  // alias SpvBuiltInWorldRayDirectionNV
-    case SpvBuiltInObjectRayOriginKHR:    // alias SpvBuiltInObjectRayOriginNV
-    case SpvBuiltInObjectRayDirectionKHR:   // alias
-                                            // SpvBuiltInObjectRayDirectionNV
-    case SpvBuiltInRayTminKHR:              // alias SpvBuiltInRayTminNV
-    case SpvBuiltInRayTmaxKHR:              // alias SpvBuiltInRayTmaxNV
-    case SpvBuiltInInstanceCustomIndexKHR:  // alias
-                                            // SpvBuiltInInstanceCustomIndexNV
-    case SpvBuiltInObjectToWorldKHR:        // alias SpvBuiltInObjectToWorldNV
-    case SpvBuiltInWorldToObjectKHR:        // alias SpvBuiltInWorldToObjectNV
-    case SpvBuiltInIncomingRayFlagsKHR:    // alias SpvBuiltInIncomingRayFlagsNV
-    case SpvBuiltInRayGeometryIndexKHR:    // NOT present in NV
-    case SpvBuiltInCullMaskKHR: {
+    case spv::BuiltIn::HitKindKHR:  // alias HitKindNV
+    case spv::BuiltIn::HitTNV:      // NOT present in KHR
+    case spv::BuiltIn::InstanceId:
+    case spv::BuiltIn::LaunchIdKHR:             // alias LaunchIdNV
+    case spv::BuiltIn::LaunchSizeKHR:           // alias LaunchSizeNV
+    case spv::BuiltIn::WorldRayOriginKHR:       // alias WorldRayOriginNV
+    case spv::BuiltIn::WorldRayDirectionKHR:    // alias WorldRayDirectionNV
+    case spv::BuiltIn::ObjectRayOriginKHR:      // alias ObjectRayOriginNV
+    case spv::BuiltIn::ObjectRayDirectionKHR:   // alias ObjectRayDirectionNV
+    case spv::BuiltIn::RayTminKHR:              // alias RayTminNV
+    case spv::BuiltIn::RayTmaxKHR:              // alias RayTmaxNV
+    case spv::BuiltIn::InstanceCustomIndexKHR:  // alias InstanceCustomIndexNV
+    case spv::BuiltIn::ObjectToWorldKHR:        // alias ObjectToWorldNV
+    case spv::BuiltIn::WorldToObjectKHR:        // alias WorldToObjectNV
+    case spv::BuiltIn::IncomingRayFlagsKHR:     // alias IncomingRayFlagsNV
+    case spv::BuiltIn::RayGeometryIndexKHR:    // NOT present in NV
+    case spv::BuiltIn::HitTriangleVertexPositionsKHR:
+    case spv::BuiltIn::CullMaskKHR: {
       return ValidateRayTracingBuiltinsAtDefinition(decoration, inst);
     }
-    case SpvBuiltInWorkDim:
-    case SpvBuiltInGlobalSize:
-    case SpvBuiltInEnqueuedWorkgroupSize:
-    case SpvBuiltInGlobalOffset:
-    case SpvBuiltInGlobalLinearId:
-    case SpvBuiltInSubgroupMaxSize:
-    case SpvBuiltInNumEnqueuedSubgroups:
-    case SpvBuiltInBaryCoordNoPerspAMD:
-    case SpvBuiltInBaryCoordNoPerspCentroidAMD:
-    case SpvBuiltInBaryCoordNoPerspSampleAMD:
-    case SpvBuiltInBaryCoordSmoothAMD:
-    case SpvBuiltInBaryCoordSmoothCentroidAMD:
-    case SpvBuiltInBaryCoordSmoothSampleAMD:
-    case SpvBuiltInBaryCoordPullModelAMD:
-    case SpvBuiltInViewportMaskNV:
-    case SpvBuiltInSecondaryPositionNV:
-    case SpvBuiltInSecondaryViewportMaskNV:
-    case SpvBuiltInPositionPerViewNV:
-    case SpvBuiltInViewportMaskPerViewNV:
-    case SpvBuiltInMax:
-    case SpvBuiltInTaskCountNV:
-    case SpvBuiltInPrimitiveCountNV:
-    case SpvBuiltInPrimitiveIndicesNV:
-    case SpvBuiltInClipDistancePerViewNV:
-    case SpvBuiltInCullDistancePerViewNV:
-    case SpvBuiltInLayerPerViewNV:
-    case SpvBuiltInMeshViewCountNV:
-    case SpvBuiltInMeshViewIndicesNV:
-    case SpvBuiltInCurrentRayTimeNV:
-      // No validation rules (for the moment).
-      break;
-
-    case SpvBuiltInPrimitiveShadingRateKHR: {
+    // These are only for Mesh, not Task execution model
+    case spv::BuiltIn::CullPrimitiveEXT:
+    case spv::BuiltIn::PrimitivePointIndicesEXT:
+    case spv::BuiltIn::PrimitiveLineIndicesEXT:
+    case spv::BuiltIn::PrimitiveTriangleIndicesEXT: {
+      return ValidateMeshShadingEXTBuiltinsAtDefinition(decoration, inst);
+    }
+    case spv::BuiltIn::PrimitiveShadingRateKHR: {
       return ValidatePrimitiveShadingRateAtDefinition(decoration, inst);
     }
-    case SpvBuiltInShadingRateKHR: {
+    case spv::BuiltIn::ShadingRateKHR: {
       return ValidateShadingRateAtDefinition(decoration, inst);
     }
+    case spv::BuiltIn::SamplerHeapEXT:
+    case spv::BuiltIn::ResourceHeapEXT: {
+      return ValidateDescriptorHeapAtDefinition(decoration, inst);
+    }
+    case spv::BuiltIn::TileOffsetQCOM:
+    case spv::BuiltIn::TileDimensionQCOM:
+    case spv::BuiltIn::TileApronSizeQCOM: {
+      return ValidateTileQCOMBuiltinAtDefinition(decoration, inst);
+    }
+    default:
+      // No validation rules (for the moment).
+      break;
   }
   return SPV_SUCCESS;
 }
@@ -4301,7 +5261,7 @@ spv_result_t BuiltInsValidator::ValidateBuiltInsAtDefinition() {
     assert(inst);
 
     for (const auto& decoration : kv.second) {
-      if (decoration.dec_type() != SpvDecorationBuiltIn) {
+      if (decoration.dec_type() != spv::Decoration::BuiltIn) {
         continue;
       }
 

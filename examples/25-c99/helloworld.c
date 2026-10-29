@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2016 Branimir Karadzic. All rights reserved.
+ * Copyright 2011-2025 Branimir Karadzic. All rights reserved.
  * License: http://www.opensource.org/licenses/BSD-2-Clause
  */
 
@@ -7,8 +7,9 @@
 #include "../00-helloworld/logo.h"
 
 extern bool entry_process_events(uint32_t* _width, uint32_t* _height, uint32_t* _debug, uint32_t* _reset);
-extern void* entry_get_default_native_window_handle();
-extern void* entry_get_native_display_handle();
+extern void* entry_get_default_native_window_handle(void);
+extern void* entry_get_native_display_handle(void);
+extern bgfx_native_window_handle_type_t entry_get_native_window_handle_type(void);
 
 uint16_t uint16_max(uint16_t _a, uint16_t _b)
 {
@@ -27,14 +28,18 @@ int32_t _main_(int32_t _argc, char** _argv)
 	bgfx_init_t init;
 	bgfx_init_ctor(&init);
 
-	init.platformData.nwh = entry_get_default_native_window_handle();
-	init.platformData.ndt = entry_get_native_display_handle();
+	init.swapChain.width  = width;
+	init.swapChain.height = height;
+
+	init.swapChain.nwh    = entry_get_default_native_window_handle();
+	init.swapChain.ndt    = entry_get_native_display_handle();
+	init.platformData.type = entry_get_native_window_handle_type();
 
 	bgfx_init(&init);
-	bgfx_reset(width, height, reset, init.resolution.format);
+	bgfx_reset(reset, &init.swapChain);
 
 	// Enable debug text.
-	bgfx_set_debug(debug);
+	bgfx_set_debug(debug, (bgfx_frame_buffer_handle_t)BGFX_INVALID_HANDLE, 0);
 
 	bgfx_set_view_clear(0
 		, BGFX_CLEAR_COLOR|BGFX_CLEAR_DEPTH
@@ -46,7 +51,7 @@ int32_t _main_(int32_t _argc, char** _argv)
 	while (!entry_process_events(&width, &height, &debug, &reset) )
 	{
 		// Set view 0 default viewport.
-		bgfx_set_view_rect(0, 0, 0, (uint16_t)width, (uint16_t)height);
+		bgfx_set_view_rect(0, 0, 0, (uint16_t)width, (uint16_t)height, 0.0f, 1.0f);
 
 		// This dummy draw call is here to make sure that view 0 is cleared
 		// if no other draw calls are submitted to view 0.

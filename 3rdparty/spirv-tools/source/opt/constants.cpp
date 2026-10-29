@@ -14,7 +14,6 @@
 
 #include "source/opt/constants.h"
 
-#include <unordered_map>
 #include <vector>
 
 #include "source/opt/ir_context.h"
@@ -288,6 +287,10 @@ std::unique_ptr<Constant> ConstantManager::CreateConstant(
     auto components = GetConstantsFromIds(literal_words_or_ids);
     if (components.empty()) return nullptr;
     return MakeUnique<ArrayConstant>(at, components);
+  } else if (auto* tt = type->AsTensorARM()) {
+    auto components = GetConstantsFromIds(literal_words_or_ids);
+    if (components.empty()) return nullptr;
+    return MakeUnique<TensorConstant>(tt, components);
   } else {
     return nullptr;
   }
@@ -303,25 +306,62 @@ const Constant* ConstantManager::GetConstantFromInst(const Instruction* inst) {
                                 inst->GetInOperand(i).words.end());
   }
 
+  const Type* type = GetType(inst);
+
   switch (inst->opcode()) {
     // OpConstant{True|False} have the value embedded in the opcode. So they
     // are not handled by the for-loop above. Here we add the value explicitly.
-    case SpvOp::SpvOpConstantTrue:
+    case spv::Op::OpConstantTrue:
       literal_words_or_ids.push_back(true);
       break;
-    case SpvOp::SpvOpConstantFalse:
+    case spv::Op::OpConstantFalse:
       literal_words_or_ids.push_back(false);
       break;
-    case SpvOp::SpvOpConstantNull:
-    case SpvOp::SpvOpConstant:
-    case SpvOp::SpvOpConstantComposite:
-    case SpvOp::SpvOpSpecConstantComposite:
+    case spv::Op::OpConstantNull:
+    case spv::Op::OpConstant:
+    case spv::Op::OpConstantComposite:
+    case spv::Op::OpSpecConstantComposite:
       break;
+    // Replicated composite constant instructions have a single operand for the
+    // value. We need to replicate it as many times as there are components.
+    case spv::Op::OpConstantCompositeReplicateEXT:
+    case spv::Op::OpSpecConstantCompositeReplicateEXT: {
+      uint32_t value = literal_words_or_ids[0];
+      uint64_t component_count = type->NumberOfComponents();
+      if (const auto* tensor_type = type->AsTensorARM()) {
+        // TensorARM shape is stored as an ID, so resolve the outer
+        // dimension here instead of using Type::NumberOfComponents().
+        if (!tensor_type->is_shaped()) {
+          return nullptr;
+        }
+        const auto* shape_inst =
+            context()->get_def_use_mgr()->GetDef(tensor_type->shape_id());
+        if (!shape_inst) {
+          return nullptr;
+        }
+        const auto* shape_cst = GetConstantFromInst(shape_inst);
+        if (!shape_cst || !shape_cst->AsArrayConstant()) {
+          return nullptr;
+        }
+        const auto& shape_components =
+            shape_cst->AsArrayConstant()->GetComponents();
+        if (shape_components.empty()) {
+          return nullptr;
+        }
+        const auto* outer_dim_cst = shape_components.front()->AsIntConstant();
+        if (!outer_dim_cst) {
+          return nullptr;
+        }
+        component_count = outer_dim_cst->GetZeroExtendedValue();
+      }
+      literal_words_or_ids.assign(static_cast<size_t>(component_count), value);
+      break;
+    }
     default:
       return nullptr;
   }
 
-  return GetConstant(GetType(inst), literal_words_or_ids);
+  return GetConstant(type, literal_words_or_ids);
 }
 
 std::unique_ptr<Instruction> ConstantManager::CreateInstruction(
@@ -329,22 +369,22 @@ std::unique_ptr<Instruction> ConstantManager::CreateInstruction(
   uint32_t type =
       (type_id == 0) ? context()->get_type_mgr()->GetId(c->type()) : type_id;
   if (c->AsNullConstant()) {
-    return MakeUnique<Instruction>(context(), SpvOp::SpvOpConstantNull, type,
-                                   id, std::initializer_list<Operand>{});
+    return MakeUnique<Instruction>(context(), spv::Op::OpConstantNull, type, id,
+                                   std::initializer_list<Operand>{});
   } else if (const BoolConstant* bc = c->AsBoolConstant()) {
     return MakeUnique<Instruction>(
         context(),
-        bc->value() ? SpvOp::SpvOpConstantTrue : SpvOp::SpvOpConstantFalse,
-        type, id, std::initializer_list<Operand>{});
+        bc->value() ? spv::Op::OpConstantTrue : spv::Op::OpConstantFalse, type,
+        id, std::initializer_list<Operand>{});
   } else if (const IntConstant* ic = c->AsIntConstant()) {
     return MakeUnique<Instruction>(
-        context(), SpvOp::SpvOpConstant, type, id,
+        context(), spv::Op::OpConstant, type, id,
         std::initializer_list<Operand>{
             Operand(spv_operand_type_t::SPV_OPERAND_TYPE_TYPED_LITERAL_NUMBER,
                     ic->words())});
   } else if (const FloatConstant* fc = c->AsFloatConstant()) {
     return MakeUnique<Instruction>(
-        context(), SpvOp::SpvOpConstant, type, id,
+        context(), spv::Op::OpConstant, type, id,
         std::initializer_list<Operand>{
             Operand(spv_operand_type_t::SPV_OPERAND_TYPE_TYPED_LITERAL_NUMBER,
                     fc->words())});
@@ -362,10 +402,16 @@ std::unique_ptr<Instruction> ConstantManager::CreateCompositeInstruction(
   uint32_t component_index = 0;
   for (const Constant* component_const : cc->GetComponents()) {
     uint32_t component_type_id = 0;
-    if (type_inst && type_inst->opcode() == SpvOpTypeStruct) {
+    if (type_inst && type_inst->opcode() == spv::Op::OpTypeStruct) {
       component_type_id = type_inst->GetSingleWordInOperand(component_index);
-    } else if (type_inst && type_inst->opcode() == SpvOpTypeArray) {
+    } else if (type_inst && type_inst->opcode() == spv::Op::OpTypeArray) {
       component_type_id = type_inst->GetSingleWordInOperand(0);
+    } else if (type_inst && type_inst->opcode() == spv::Op::OpTypeTensorARM) {
+      component_type_id =
+          context()->get_type_mgr()->GetId(component_const->type());
+      if (component_type_id == 0) {
+        return nullptr;
+      }
     }
     uint32_t id = FindDeclaredConstant(component_const, component_type_id);
 
@@ -381,7 +427,7 @@ std::unique_ptr<Instruction> ConstantManager::CreateCompositeInstruction(
   }
   uint32_t type =
       (type_id == 0) ? context()->get_type_mgr()->GetId(cc->type()) : type_id;
-  return MakeUnique<Instruction>(context(), SpvOp::SpvOpConstantComposite, type,
+  return MakeUnique<Instruction>(context(), spv::Op::OpConstantComposite, type,
                                  result_id, std::move(operands));
 }
 
@@ -389,6 +435,158 @@ const Constant* ConstantManager::GetConstant(
     const Type* type, const std::vector<uint32_t>& literal_words_or_ids) {
   auto cst = CreateConstant(type, literal_words_or_ids);
   return cst ? RegisterConstant(std::move(cst)) : nullptr;
+}
+
+const Constant* ConstantManager::GetNullCompositeConstant(const Type* type) {
+  std::vector<uint32_t> literal_words_or_id;
+
+  if (type->AsVector()) {
+    const Type* element_type = type->AsVector()->element_type();
+    const uint32_t null_id = GetNullConstId(element_type);
+    const uint32_t element_count = type->AsVector()->element_count();
+    for (uint32_t i = 0; i < element_count; i++) {
+      literal_words_or_id.push_back(null_id);
+    }
+  } else if (type->AsMatrix()) {
+    const Type* element_type = type->AsMatrix()->element_type();
+    const uint32_t null_id = GetNullConstId(element_type);
+    const uint32_t element_count = type->AsMatrix()->element_count();
+    for (uint32_t i = 0; i < element_count; i++) {
+      literal_words_or_id.push_back(null_id);
+    }
+  } else if (type->AsStruct()) {
+    // TODO (sfricke-lunarg) add proper struct support
+    return nullptr;
+  } else if (type->AsArray()) {
+    const Type* element_type = type->AsArray()->element_type();
+    const uint32_t null_id = GetNullConstId(element_type);
+    assert(type->AsArray()->length_info().words[0] ==
+               analysis::Array::LengthInfo::kConstant &&
+           "unexpected array length");
+    const uint32_t element_count = type->AsArray()->length_info().words[0];
+    for (uint32_t i = 0; i < element_count; i++) {
+      literal_words_or_id.push_back(null_id);
+    }
+  } else if (type->AsTensorARM()) {
+    auto ttype = type->AsTensorARM();
+    assert(ttype->is_shaped() && "Only shaped tensors are composites");
+    const auto* shape_inst =
+        context()->get_def_use_mgr()->GetDef(ttype->shape_id());
+    if (!shape_inst) {
+      return nullptr;
+    }
+    const auto* shape_cst = GetConstantFromInst(shape_inst);
+    if (!shape_cst || !shape_cst->AsArrayConstant()) {
+      return nullptr;
+    }
+    const auto& shape_components =
+        shape_cst->AsArrayConstant()->GetComponents();
+    if (shape_components.empty()) {
+      return nullptr;
+    }
+    const auto* outer_dim_cst = shape_components.front()->AsIntConstant();
+    if (!outer_dim_cst) {
+      return nullptr;
+    }
+    const uint64_t element_count = outer_dim_cst->GetZeroExtendedValue();
+    std::vector<const Constant*> components;
+    components.reserve(static_cast<size_t>(element_count));
+
+    if (shape_components.size() == 1) {
+      const Constant* element_null = GetConstant(ttype->element_type(), {});
+      for (uint64_t i = 0; i < element_count; i++) {
+        components.push_back(element_null);
+      }
+      return RegisterConstant(
+          MakeUnique<TensorConstant>(ttype, std::move(components)));
+    }
+
+    const Constant* rank_cst = nullptr;
+    if (ttype->rank_id() != 0) {
+      const auto* rank_inst =
+          context()->get_def_use_mgr()->GetDef(ttype->rank_id());
+      if (rank_inst) {
+        rank_cst = GetConstantFromInst(rank_inst);
+      }
+    }
+    uint64_t rank_value = shape_components.size();
+    if (rank_cst && rank_cst->AsIntConstant()) {
+      rank_value = rank_cst->AsIntConstant()->GetZeroExtendedValue();
+    }
+    if (rank_value <= 1) {
+      const Constant* element_null = GetConstant(ttype->element_type(), {});
+      for (uint64_t i = 0; i < element_count; i++) {
+        components.push_back(element_null);
+      }
+      return RegisterConstant(
+          MakeUnique<TensorConstant>(ttype, std::move(components)));
+    }
+
+    const uint64_t inner_rank = rank_value - 1;
+    const auto* rank_int_type =
+        rank_cst ? rank_cst->type()->AsInteger() : nullptr;
+    if (!rank_int_type) {
+      rank_int_type = outer_dim_cst->type()->AsInteger();
+    }
+    if (!rank_int_type) {
+      return nullptr;
+    }
+    const Constant* inner_rank_cst =
+        GenerateIntegerConstant(rank_int_type, inner_rank);
+    const uint32_t inner_rank_id =
+        GetDefiningInstruction(inner_rank_cst)->result_id();
+
+    const Type* shape_elem_type = shape_components[1]->type();
+    const auto* shape_elem_int = shape_elem_type->AsInteger();
+    if (!shape_elem_int) {
+      return nullptr;
+    }
+    const Constant* inner_shape_len_cst =
+        GenerateIntegerConstant(shape_elem_int, inner_rank);
+    const uint32_t inner_shape_len_id =
+        GetDefiningInstruction(inner_shape_len_cst)->result_id();
+    Array::LengthInfo inner_shape_len_info{
+        inner_shape_len_id,
+        {Array::LengthInfo::kConstant, static_cast<uint32_t>(inner_rank)}};
+    Array inner_shape_type(shape_elem_type, inner_shape_len_info);
+    const Type* inner_shape_reg_type =
+        context()->get_type_mgr()->GetRegisteredType(&inner_shape_type);
+    if (!inner_shape_reg_type) {
+      return nullptr;
+    }
+    std::vector<uint32_t> inner_shape_ids;
+    inner_shape_ids.reserve(shape_components.size() - 1);
+    for (size_t i = 1; i < shape_components.size(); ++i) {
+      inner_shape_ids.push_back(
+          GetDefiningInstruction(shape_components[i])->result_id());
+    }
+    const Constant* inner_shape_cst =
+        GetConstant(inner_shape_reg_type, inner_shape_ids);
+    const uint32_t inner_shape_id =
+        GetDefiningInstruction(inner_shape_cst)->result_id();
+
+    TensorARM inner_tensor_type(ttype->element_type(), inner_rank_id,
+                                inner_shape_id);
+    const Type* inner_tensor_reg_type =
+        context()->get_type_mgr()->GetRegisteredType(&inner_tensor_type);
+    if (!inner_tensor_reg_type) {
+      return nullptr;
+    }
+    const Constant* inner_null_tensor =
+        GetNullCompositeConstant(inner_tensor_reg_type);
+    if (!inner_null_tensor) {
+      return nullptr;
+    }
+    for (uint64_t i = 0; i < element_count; i++) {
+      components.push_back(inner_null_tensor);
+    }
+    return RegisterConstant(
+        MakeUnique<TensorConstant>(ttype, std::move(components)));
+  } else {
+    return nullptr;
+  }
+
+  return GetConstant(type, literal_words_or_id);
 }
 
 const Constant* ConstantManager::GetNumericVectorConstantWithWords(
@@ -399,6 +597,8 @@ const Constant* ConstantManager::GetNumericVectorConstantWithWords(
     words_per_element = float_type->width() / 32;
   else if (const auto* int_type = element_type->AsInteger())
     words_per_element = int_type->width() / 32;
+  else if (element_type->AsBool() != nullptr)
+    words_per_element = 1;
 
   if (words_per_element != 1 && words_per_element != 2) return nullptr;
 
@@ -423,7 +623,9 @@ const Constant* ConstantManager::GetNumericVectorConstantWithWords(
 
 uint32_t ConstantManager::GetFloatConstId(float val) {
   const Constant* c = GetFloatConst(val);
-  return GetDefiningInstruction(c)->result_id();
+  Instruction* inst = GetDefiningInstruction(c);
+  if (inst == nullptr) return 0;
+  return inst->result_id();
 }
 
 const Constant* ConstantManager::GetFloatConst(float val) {
@@ -435,7 +637,9 @@ const Constant* ConstantManager::GetFloatConst(float val) {
 
 uint32_t ConstantManager::GetDoubleConstId(double val) {
   const Constant* c = GetDoubleConst(val);
-  return GetDefiningInstruction(c)->result_id();
+  Instruction* inst = GetDefiningInstruction(c);
+  if (inst == nullptr) return 0;
+  return inst->result_id();
 }
 
 const Constant* ConstantManager::GetDoubleConst(double val) {
@@ -445,16 +649,68 @@ const Constant* ConstantManager::GetDoubleConst(double val) {
   return c;
 }
 
-uint32_t ConstantManager::GetSIntConst(int32_t val) {
+uint32_t ConstantManager::GetSIntConstId(int32_t val) {
   Type* sint_type = context()->get_type_mgr()->GetSIntType();
   const Constant* c = GetConstant(sint_type, {static_cast<uint32_t>(val)});
   return GetDefiningInstruction(c)->result_id();
 }
 
-uint32_t ConstantManager::GetUIntConst(uint32_t val) {
+const Constant* ConstantManager::GetIntConst(uint64_t val, int32_t bitWidth,
+                                             bool isSigned) {
+  Type* int_type = context()->get_type_mgr()->GetIntType(bitWidth, isSigned);
+
+  if (isSigned) {
+    // Sign extend the value.
+    int32_t num_of_bit_to_ignore = 64 - bitWidth;
+    val = static_cast<int64_t>(val << num_of_bit_to_ignore) >>
+          num_of_bit_to_ignore;
+  } else if (bitWidth < 64) {
+    // Clear the upper bit that are not used.
+    uint64_t mask = ((1ull << bitWidth) - 1);
+    val &= mask;
+  }
+
+  if (bitWidth <= 32) {
+    return GetConstant(int_type, {static_cast<uint32_t>(val)});
+  }
+
+  // If the value is more than 32-bit, we need to split the operands into two
+  // 32-bit integers.
+  return GetConstant(
+      int_type, {static_cast<uint32_t>(val), static_cast<uint32_t>(val >> 32)});
+}
+
+uint32_t ConstantManager::GetUIntConstId(uint32_t val) {
   Type* uint_type = context()->get_type_mgr()->GetUIntType();
   const Constant* c = GetConstant(uint_type, {val});
   return GetDefiningInstruction(c)->result_id();
+}
+
+uint32_t ConstantManager::GetNullConstId(const Type* type) {
+  const Constant* c = GetConstant(type, {});
+  return GetDefiningInstruction(c)->result_id();
+}
+
+const Constant* ConstantManager::GenerateIntegerConstant(
+    const analysis::Integer* integer_type, uint64_t result) {
+  assert(integer_type != nullptr);
+
+  std::vector<uint32_t> words;
+  if (integer_type->width() == 64) {
+    // In the 64-bit case, two words are needed to represent the value.
+    words = {static_cast<uint32_t>(result),
+             static_cast<uint32_t>(result >> 32)};
+  } else {
+    // In all other cases, only a single word is needed.
+    assert(integer_type->width() <= 32);
+    if (integer_type->IsSigned()) {
+      result = utils::SignExtendValue(result, integer_type->width());
+    } else {
+      result = utils::ZeroExtendValue(result, integer_type->width());
+    }
+    words = {static_cast<uint32_t>(result)};
+  }
+  return GetConstant(integer_type, words);
 }
 
 std::vector<const analysis::Constant*> Constant::GetVectorComponents(

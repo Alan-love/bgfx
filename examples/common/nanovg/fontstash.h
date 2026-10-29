@@ -231,7 +231,7 @@ void fons__tt_renderGlyphBitmap(FONSttFontImpl *font, unsigned char *output, int
 {
 	FT_GlyphSlot ftGlyph = font->font->glyph;
 	int ftGlyphOffset = 0;
-	int x, y;
+	unsigned int x, y;
 	FONS_NOTUSED(outWidth);
 	FONS_NOTUSED(outHeight);
 	FONS_NOTUSED(scaleX);
@@ -1650,8 +1650,8 @@ void fonsDeleteInternal(FONScontext* stash)
 	if (stash->fonts) free(stash->fonts);
 	if (stash->texData) free(stash->texData);
 	if (stash->scratch) free(stash->scratch);
-	free(stash);
 	fons__tt_done(stash);
+	free(stash);
 }
 
 void fonsSetErrorCallback(FONScontext* stash, void (*callback)(void* uptr, int error, int val), void* uptr)

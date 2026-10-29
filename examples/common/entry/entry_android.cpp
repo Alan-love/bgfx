@@ -1,5 +1,5 @@
 /*
- * Copyright 2011-2022 Branimir Karadzic. All rights reserved.
+ * Copyright 2011-2026 Branimir Karadzic. All rights reserved.
  * License: https://github.com/bkaradzic/bgfx/blob/master/LICENSE
  */
 
@@ -189,9 +189,10 @@ namespace entry
 
 			while (0 == m_app->destroyRequested)
 			{
-				int32_t num;
 				android_poll_source* source;
-				/*int32_t id =*/ ALooper_pollAll(-1, NULL, &num, (void**)&source);
+				int32_t result = ALooper_pollOnce(-1, NULL, NULL, reinterpret_cast<void**>(&source));
+
+				BX_ASSERT(ALOOPER_POLL_ERROR != result, "ALooper_pollOnce returned an error.");
 
 				if (NULL != source)
 				{
@@ -225,6 +226,7 @@ namespace entry
 
 						DBG("ANativeWindow width %d, height %d", width, height);
 						WindowHandle defaultWindow = { 0 };
+						m_eventQueue.postWindowEvent(defaultWindow, m_window);
 						m_eventQueue.postSizeEvent(defaultWindow, width, height);
 
 						if (!m_thread.isRunning() )
@@ -239,6 +241,8 @@ namespace entry
 					// terminated.  Upon receiving this command, android_app->window still
 					// contains the existing window; after calling android_app_exec_cmd
 					// it will be set to NULL.
+					m_window = NULL;
+					m_eventQueue.postWindowEvent({ 0 });
 					break;
 
 				case APP_CMD_WINDOW_RESIZED:
@@ -550,16 +554,23 @@ namespace entry
 		return NULL;
 	}
 
+	bgfx::NativeWindowHandleType::Enum getNativeWindowHandleType()
+	{
+		return bgfx::NativeWindowHandleType::Default;
+	}
+
 	int32_t MainThreadEntry::threadFunc(bx::Thread* _thread, void* _userData)
 	{
 		BX_UNUSED(_thread);
 
 		int32_t result = chdir("/sdcard/bgfx/examples/runtime");
-		BX_ASSERT(0 == result, "Failed to chdir to dir. android.permission.WRITE_EXTERNAL_STORAGE?", errno);
+		BX_ASSERT(0 == result
+			, "Failed to chdir to directory (errno: %d, android.permission.WRITE_EXTERNAL_STORAGE?)."
+			, errno
+			);
 
 		MainThreadEntry* self = (MainThreadEntry*)_userData;
 		result = main(self->m_argc, self->m_argv);
-//		PostMessage(s_ctx.m_hwnd, WM_QUIT, 0, 0);
 		return result;
 	}
 

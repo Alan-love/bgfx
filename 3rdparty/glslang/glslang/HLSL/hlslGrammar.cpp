@@ -1,6 +1,7 @@
 //
 // Copyright (C) 2016-2018 Google, Inc.
 // Copyright (C) 2016 LunarG, Inc.
+// Copyright (C) 2023 Mobica Limited.
 //
 // All rights reserved.
 //
@@ -51,6 +52,7 @@
 // in the rule will have been consumed, and none left in 'token'.
 //
 
+#include "../Include/defer.h"
 #include "hlslTokens.h"
 #include "hlslGrammar.h"
 #include "hlslAttributes.h"
@@ -389,7 +391,8 @@ bool HlslGrammar::acceptDeclaration(TIntermNode*& nodeList)
     case EvqIn:
     case EvqOut:
     case EvqInOut:
-        parseContext.error(token.loc, "in/out qualifiers are only valid on parameters", token.string->c_str(), "");
+        parseContext.error(token.loc, "in/out qualifiers are only valid on parameters", token.getCStrOrEmpty(), "");
+        break;
     default:
         break;
     }
@@ -594,6 +597,7 @@ bool HlslGrammar::acceptControlDeclaration(TIntermNode*& node)
 // fully_specified_type
 //      : type_specifier
 //      | type_qualifier type_specifier
+//      | type_specifier type_qualifier
 //
 bool HlslGrammar::acceptFullySpecifiedType(TType& type, const TAttributes& attributes)
 {
@@ -605,7 +609,7 @@ bool HlslGrammar::acceptFullySpecifiedType(TType& type, TIntermNode*& nodeList, 
     // type_qualifier
     TQualifier qualifier;
     qualifier.clear();
-    if (! acceptQualifier(qualifier))
+    if (! acceptPreQualifier(qualifier))
         return false;
     TSourceLoc loc = token.loc;
 
@@ -619,6 +623,10 @@ bool HlslGrammar::acceptFullySpecifiedType(TType& type, TIntermNode*& nodeList, 
 
         return false;
     }
+
+    // type_qualifier
+    if (! acceptPostQualifier(qualifier))
+       return false;
 
     if (type.getBasicType() == EbtBlock) {
         // the type was a block, which set some parts of the qualifier
@@ -634,7 +642,7 @@ bool HlslGrammar::acceptFullySpecifiedType(TType& type, TIntermNode*& nodeList, 
             parseContext.declareBlock(loc, type);
     } else {
         // Some qualifiers are set when parsing the type.  Merge those with
-        // whatever comes from acceptQualifier.
+        // whatever comes from acceptPreQualifier and acceptPostQualifier.
         assert(qualifier.layoutFormat == ElfNone);
 
         qualifier.layoutFormat = type.getQualifier().layoutFormat;
@@ -660,7 +668,7 @@ bool HlslGrammar::acceptFullySpecifiedType(TType& type, TIntermNode*& nodeList, 
 //
 // Zero or more of these, so this can't return false.
 //
-bool HlslGrammar::acceptQualifier(TQualifier& qualifier)
+bool HlslGrammar::acceptPreQualifier(TQualifier& qualifier)
 {
     do {
         switch (peek()) {
@@ -766,6 +774,25 @@ bool HlslGrammar::acceptQualifier(TQualifier& qualifier)
     } while (true);
 }
 
+// type_qualifier
+//      : qualifier qualifier ...
+//
+// Zero or more of these, so this can't return false.
+//
+bool HlslGrammar::acceptPostQualifier(TQualifier& qualifier)
+{
+    do {
+        switch (peek()) {
+        case EHTokConst:
+            qualifier.storage = EvqConst;
+            break;
+        default:
+            return true;
+        }
+        advanceToken();
+    } while (true);
+}
+
 // layout_qualifier_list
 //      : LAYOUT LEFT_PAREN layout_qualifier COMMA layout_qualifier ... RIGHT_PAREN
 //
@@ -823,8 +850,10 @@ bool HlslGrammar::acceptLayoutQualifierList(TQualifier& qualifier)
 //      | UINT
 //      | BOOL
 //
-bool HlslGrammar::acceptTemplateVecMatBasicType(TBasicType& basicType)
+bool HlslGrammar::acceptTemplateVecMatBasicType(TBasicType& basicType,
+                                                TPrecisionQualifier& precision)
 {
+    precision = EpqNone;
     switch (peek()) {
     case EHTokFloat:
         basicType = EbtFloat;
@@ -841,6 +870,23 @@ bool HlslGrammar::acceptTemplateVecMatBasicType(TBasicType& basicType)
         break;
     case EHTokBool:
         basicType = EbtBool;
+        break;
+    case EHTokHalf:
+        basicType = parseContext.hlslEnable16BitTypes() ? EbtFloat16 : EbtFloat;
+        break;
+    case EHTokMin16float:
+    case EHTokMin10float:
+        basicType = parseContext.hlslEnable16BitTypes() ? EbtFloat16 : EbtFloat;
+        precision = EpqMedium;
+        break;
+    case EHTokMin16int:
+    case EHTokMin12int:
+        basicType = parseContext.hlslEnable16BitTypes() ? EbtInt16 : EbtInt;
+        precision = EpqMedium;
+        break;
+    case EHTokMin16uint:
+        basicType = parseContext.hlslEnable16BitTypes() ? EbtUint16 : EbtUint;
+        precision = EpqMedium;
         break;
     default:
         return false;
@@ -867,7 +913,8 @@ bool HlslGrammar::acceptVectorTemplateType(TType& type)
     }
 
     TBasicType basicType;
-    if (! acceptTemplateVecMatBasicType(basicType)) {
+    TPrecisionQualifier precision;
+    if (! acceptTemplateVecMatBasicType(basicType, precision)) {
         expected("scalar type");
         return false;
     }
@@ -890,7 +937,7 @@ bool HlslGrammar::acceptVectorTemplateType(TType& type)
 
     const int vecSizeI = vecSize->getAsConstantUnion()->getConstArray()[0].getIConst();
 
-    new(&type) TType(basicType, EvqTemporary, vecSizeI);
+    new(&type) TType(basicType, EvqTemporary, precision, vecSizeI);
 
     if (vecSizeI == 1)
         type.makeVector();
@@ -919,7 +966,8 @@ bool HlslGrammar::acceptMatrixTemplateType(TType& type)
     }
 
     TBasicType basicType;
-    if (! acceptTemplateVecMatBasicType(basicType)) {
+    TPrecisionQualifier precision;
+    if (! acceptTemplateVecMatBasicType(basicType, precision)) {
         expected("scalar type");
         return false;
     }
@@ -956,7 +1004,7 @@ bool HlslGrammar::acceptMatrixTemplateType(TType& type)
     if (! acceptLiteral(cols))
         return false;
 
-    new(&type) TType(basicType, EvqTemporary, 0,
+    new(&type) TType(basicType, EvqTemporary, precision, 0,
                      rows->getAsConstantUnion()->getConstArray()[0].getIConst(),
                      cols->getAsConstantUnion()->getConstArray()[0].getIConst());
 
@@ -1163,7 +1211,8 @@ bool HlslGrammar::acceptSubpassInputType(TType& type)
         }
     }
 
-    const TBasicType subpassBasicType = subpassType.isStruct() ? (*subpassType.getStruct())[0].type->getBasicType()
+    const TBasicType subpassBasicType = (subpassType.isStruct() && !subpassType.getStruct()->empty())
+        ? (*subpassType.getStruct())[0].type->getBasicType()
         : subpassType.getBasicType();
 
     TSampler sampler;
@@ -1388,7 +1437,8 @@ bool HlslGrammar::acceptTextureType(TType& type)
     if (image || dim == EsdBuffer)
         format = parseContext.getLayoutFromTxType(token.loc, txType);
 
-    const TBasicType txBasicType = txType.isStruct() ? (*txType.getStruct())[0].type->getBasicType()
+    const TBasicType txBasicType = (txType.isStruct() && !txType.getStruct()->empty())
+        ? (*txType.getStruct())[0].type->getBasicType()
         : txType.getBasicType();
 
     // Non-image Buffers are combined
@@ -2064,6 +2114,251 @@ bool HlslGrammar::acceptType(TType& type, TIntermNode*& nodeList)
         new(&type) TType(EbtDouble, EvqTemporary, 0, 4, 4);
         break;
 
+    case EHTokMin16float1x1:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 1, 1);
+        break;
+    case EHTokMin16float1x2:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 1, 2);
+        break;
+    case EHTokMin16float1x3:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 1, 3);
+        break;
+    case EHTokMin16float1x4:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 1, 4);
+        break;
+    case EHTokMin16float2x1:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 2, 1);
+        break;
+    case EHTokMin16float2x2:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 2, 2);
+        break;
+    case EHTokMin16float2x3:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 2, 3);
+        break;
+    case EHTokMin16float2x4:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 2, 4);
+        break;
+    case EHTokMin16float3x1:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 3, 1);
+        break;
+    case EHTokMin16float3x2:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 3, 2);
+        break;
+    case EHTokMin16float3x3:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 3, 3);
+        break;
+    case EHTokMin16float3x4:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 3, 4);
+        break;
+    case EHTokMin16float4x1:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 4, 1);
+        break;
+    case EHTokMin16float4x2:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 4, 2);
+        break;
+    case EHTokMin16float4x3:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 4, 3);
+        break;
+    case EHTokMin16float4x4:
+        new(&type) TType(min16float_bt, EvqTemporary, EpqMedium, 0, 4, 4);
+        break;
+
+    case EHTokMin10float1x1:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 1, 1);
+        break;
+    case EHTokMin10float1x2:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 1, 2);
+        break;
+    case EHTokMin10float1x3:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 1, 3);
+        break;
+    case EHTokMin10float1x4:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 1, 4);
+        break;
+    case EHTokMin10float2x1:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 2, 1);
+        break;
+    case EHTokMin10float2x2:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 2, 2);
+        break;
+    case EHTokMin10float2x3:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 2, 3);
+        break;
+    case EHTokMin10float2x4:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 2, 4);
+        break;
+    case EHTokMin10float3x1:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 3, 1);
+        break;
+    case EHTokMin10float3x2:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 3, 2);
+        break;
+    case EHTokMin10float3x3:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 3, 3);
+        break;
+    case EHTokMin10float3x4:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 3, 4);
+        break;
+    case EHTokMin10float4x1:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 4, 1);
+        break;
+    case EHTokMin10float4x2:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 4, 2);
+        break;
+    case EHTokMin10float4x3:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 4, 3);
+        break;
+    case EHTokMin10float4x4:
+        new(&type) TType(min10float_bt, EvqTemporary, EpqMedium, 0, 4, 4);
+        break;
+
+    case EHTokMin16int1x1:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 1, 1);
+        break;
+    case EHTokMin16int1x2:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 1, 2);
+        break;
+    case EHTokMin16int1x3:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 1, 3);
+        break;
+    case EHTokMin16int1x4:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 1, 4);
+        break;
+    case EHTokMin16int2x1:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 2, 1);
+        break;
+    case EHTokMin16int2x2:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 2, 2);
+        break;
+    case EHTokMin16int2x3:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 2, 3);
+        break;
+    case EHTokMin16int2x4:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 2, 4);
+        break;
+    case EHTokMin16int3x1:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 3, 1);
+        break;
+    case EHTokMin16int3x2:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 3, 2);
+        break;
+    case EHTokMin16int3x3:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 3, 3);
+        break;
+    case EHTokMin16int3x4:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 3, 4);
+        break;
+    case EHTokMin16int4x1:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 4, 1);
+        break;
+    case EHTokMin16int4x2:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 4, 2);
+        break;
+    case EHTokMin16int4x3:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 4, 3);
+        break;
+    case EHTokMin16int4x4:
+        new(&type) TType(min16int_bt, EvqTemporary, EpqMedium, 0, 4, 4);
+        break;
+
+    case EHTokMin12int1x1:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 1, 1);
+        break;
+    case EHTokMin12int1x2:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 1, 2);
+        break;
+    case EHTokMin12int1x3:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 1, 3);
+        break;
+    case EHTokMin12int1x4:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 1, 4);
+        break;
+    case EHTokMin12int2x1:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 2, 1);
+        break;
+    case EHTokMin12int2x2:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 2, 2);
+        break;
+    case EHTokMin12int2x3:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 2, 3);
+        break;
+    case EHTokMin12int2x4:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 2, 4);
+        break;
+    case EHTokMin12int3x1:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 3, 1);
+        break;
+    case EHTokMin12int3x2:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 3, 2);
+        break;
+    case EHTokMin12int3x3:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 3, 3);
+        break;
+    case EHTokMin12int3x4:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 3, 4);
+        break;
+    case EHTokMin12int4x1:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 4, 1);
+        break;
+    case EHTokMin12int4x2:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 4, 2);
+        break;
+    case EHTokMin12int4x3:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 4, 3);
+        break;
+    case EHTokMin12int4x4:
+        new(&type) TType(min12int_bt, EvqTemporary, EpqMedium, 0, 4, 4);
+        break;
+
+    case EHTokMin16uint1x1:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 1, 1);
+        break;
+    case EHTokMin16uint1x2:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 1, 2);
+        break;
+    case EHTokMin16uint1x3:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 1, 3);
+        break;
+    case EHTokMin16uint1x4:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 1, 4);
+        break;
+    case EHTokMin16uint2x1:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 2, 1);
+        break;
+    case EHTokMin16uint2x2:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 2, 2);
+        break;
+    case EHTokMin16uint2x3:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 2, 3);
+        break;
+    case EHTokMin16uint2x4:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 2, 4);
+        break;
+    case EHTokMin16uint3x1:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 3, 1);
+        break;
+    case EHTokMin16uint3x2:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 3, 2);
+        break;
+    case EHTokMin16uint3x3:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 3, 3);
+        break;
+    case EHTokMin16uint3x4:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 3, 4);
+        break;
+    case EHTokMin16uint4x1:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 4, 1);
+        break;
+    case EHTokMin16uint4x2:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 4, 2);
+        break;
+    case EHTokMin16uint4x3:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 4, 3);
+        break;
+    case EHTokMin16uint4x4:
+        new(&type) TType(min16uint_bt, EvqTemporary, EpqMedium, 0, 4, 4);
+        break;
+
     default:
         return false;
     }
@@ -2655,7 +2950,7 @@ bool HlslGrammar::acceptParameterDeclaration(TFunction& function)
 
     // If any prior parameters have default values, all the parameters after that must as well.
     if (defaultValue == nullptr && function.getDefaultParamCount() > 0) {
-        parseContext.error(idToken.loc, "invalid parameter after default value parameters", idToken.string->c_str(), "");
+        parseContext.error(idToken.loc, "invalid parameter after default value parameters", idToken.getCStrOrEmpty(), "");
         return false;
     }
 
@@ -2693,8 +2988,10 @@ bool HlslGrammar::acceptFunctionBody(TFunctionDeclarator& declarator, TIntermNod
 
     // compound_statement
     TIntermNode* functionBody = nullptr;
-    if (! acceptCompoundStatement(functionBody))
+    if (! acceptCompoundStatement(functionBody)) {
+        parseContext.popScope();
         return false;
+    }
 
     // this does a popScope()
     parseContext.handleFunctionBody(declarator.loc, *declarator.function, functionBody, functionNode);
@@ -2942,6 +3239,10 @@ bool HlslGrammar::acceptConditionalExpression(TIntermTyped*& node)
     --parseContext.controlFlowNestingLevel;
 
     node = intermediate.addSelection(node, trueNode, falseNode, loc);
+    if (!node) {
+        parseContext.binaryOpError(loc, ":", trueNode->getCompleteString(), falseNode->getCompleteString());
+        return false;
+    }
 
     return true;
 }
@@ -3209,6 +3510,8 @@ bool HlslGrammar::acceptPostfixExpression(TIntermTyped*& node)
             // DEC_OP
             node = intermediate.addUnaryMath(postOp, node, loc);
             node = parseContext.handleLvalue(loc, "unary operator", node);
+            if (node == nullptr)
+                return false;
             break;
         default:
             assert(0);
@@ -3428,7 +3731,7 @@ bool HlslGrammar::acceptCompoundStatement(TIntermNode*& retStatement)
         }
     }
     if (compoundStatement)
-        compoundStatement->setOperator(EOpSequence);
+        compoundStatement->setOperator(intermediate.getDebugInfo() ? EOpScope : EOpSequence);
 
     retStatement = compoundStatement;
 
@@ -3619,7 +3922,7 @@ void HlslGrammar::acceptAttributes(TAttributes& attributes)
         if (attributeToken.string != nullptr) {
             TAttributeType attributeType = parseContext.attributeFromName(nameSpace, *attributeToken.string);
             if (attributeType == EatNone)
-                parseContext.warn(attributeToken.loc, "unrecognized attribute", attributeToken.string->c_str(), "");
+                parseContext.warn(attributeToken.loc, "unrecognized attribute", attributeToken.getCStrOrEmpty(), "");
             else {
                 TAttributeArgs attributeArgs = { attributeType, expressions };
                 attributes.push_back(attributeArgs);
@@ -3643,6 +3946,7 @@ bool HlslGrammar::acceptSelectionStatement(TIntermNode*& statement, const TAttri
     // so that something declared in the condition is scoped to the lifetimes
     // of the then-else statements
     parseContext.pushScope();
+    Defer d([this]{ parseContext.popScope(); });
 
     // LEFT_PAREN expression RIGHT_PAREN
     TIntermTyped* condition;
@@ -3676,7 +3980,6 @@ bool HlslGrammar::acceptSelectionStatement(TIntermNode*& statement, const TAttri
     statement = intermediate.addSelection(condition, thenElse, loc);
     parseContext.handleSelectionAttributes(loc, statement->getAsSelectionNode(), attributes);
 
-    parseContext.popScope();
     --parseContext.controlFlowNestingLevel;
 
     return true;
@@ -3738,63 +4041,69 @@ bool HlslGrammar::acceptIterationStatement(TIntermNode*& statement, const TAttri
     TIntermLoop* loopNode = nullptr;
     switch (loop) {
     case EHTokWhile:
-        // so that something declared in the condition is scoped to the lifetime
-        // of the while sub-statement
-        parseContext.pushScope();  // this only needs to work right if no errors
-        parseContext.nestLooping();
-        ++parseContext.controlFlowNestingLevel;
+        {
+            // so that something declared in the condition is scoped to the lifetime
+            // of the while sub-statement
+            parseContext.pushScope();
+            parseContext.nestLooping();
+            ++parseContext.controlFlowNestingLevel;
+            Defer d([this]{
+                parseContext.unnestLooping();
+                parseContext.popScope();
+                --parseContext.controlFlowNestingLevel;
+            });
 
-        // LEFT_PAREN condition RIGHT_PAREN
-        if (! acceptParenExpression(condition))
-            return false;
-        condition = parseContext.convertConditionalExpression(loc, condition);
-        if (condition == nullptr)
-            return false;
+            // LEFT_PAREN condition RIGHT_PAREN
+            if (! acceptParenExpression(condition))
+                return false;
+            condition = parseContext.convertConditionalExpression(loc, condition);
+            if (condition == nullptr)
+                return false;
 
-        // statement
-        if (! acceptScopedStatement(statement)) {
-            expected("while sub-statement");
-            return false;
+            // statement
+            if (! acceptScopedStatement(statement)) {
+                expected("while sub-statement");
+                return false;
+            }
         }
-
-        parseContext.unnestLooping();
-        parseContext.popScope();
-        --parseContext.controlFlowNestingLevel;
 
         loopNode = intermediate.addLoop(statement, condition, nullptr, true, loc);
         statement = loopNode;
         break;
 
     case EHTokDo:
-        parseContext.nestLooping();  // this only needs to work right if no errors
-        ++parseContext.controlFlowNestingLevel;
+        {
+            parseContext.nestLooping();  // this only needs to work right if no errors
+            ++parseContext.controlFlowNestingLevel;
+            Defer d([this]{
+              parseContext.unnestLooping();
+              --parseContext.controlFlowNestingLevel;
+            });
 
-        // statement
-        if (! acceptScopedStatement(statement)) {
-            expected("do sub-statement");
-            return false;
+            // statement
+            if (! acceptScopedStatement(statement)) {
+                expected("do sub-statement");
+                return false;
+            }
+
+            // WHILE
+            if (! acceptTokenClass(EHTokWhile)) {
+                expected("while");
+                return false;
+            }
+
+            // LEFT_PAREN condition RIGHT_PAREN
+            if (! acceptParenExpression(condition))
+                return false;
+            condition = parseContext.convertConditionalExpression(loc, condition);
+            if (condition == nullptr)
+                return false;
+
+            if (! acceptTokenClass(EHTokSemicolon))
+                expected(";");
         }
 
-        // WHILE
-        if (! acceptTokenClass(EHTokWhile)) {
-            expected("while");
-            return false;
-        }
-
-        // LEFT_PAREN condition RIGHT_PAREN
-        if (! acceptParenExpression(condition))
-            return false;
-        condition = parseContext.convertConditionalExpression(loc, condition);
-        if (condition == nullptr)
-            return false;
-
-        if (! acceptTokenClass(EHTokSemicolon))
-            expected(";");
-
-        parseContext.unnestLooping();
-        --parseContext.controlFlowNestingLevel;
-
-        loopNode = intermediate.addLoop(statement, condition, 0, false, loc);
+        loopNode = intermediate.addLoop(statement, condition, nullptr, false, loc);
         statement = loopNode;
         break;
 
@@ -3807,6 +4116,7 @@ bool HlslGrammar::acceptIterationStatement(TIntermNode*& statement, const TAttri
         // so that something declared in the condition is scoped to the lifetime
         // of the for sub-statement
         parseContext.pushScope();
+        Defer d([this]{ parseContext.popScope(); });
 
         // initializer
         TIntermNode* initNode = nullptr;
@@ -3815,6 +4125,10 @@ bool HlslGrammar::acceptIterationStatement(TIntermNode*& statement, const TAttri
 
         parseContext.nestLooping();  // this only needs to work right if no errors
         ++parseContext.controlFlowNestingLevel;
+        Defer d2([this]{
+            parseContext.unnestLooping();
+            --parseContext.controlFlowNestingLevel;
+        });
 
         // condition SEMI_COLON
         acceptExpression(condition);
@@ -3839,10 +4153,6 @@ bool HlslGrammar::acceptIterationStatement(TIntermNode*& statement, const TAttri
         }
 
         statement = intermediate.addForLoop(statement, initNode, condition, iterator, true, loc, loopNode);
-
-        parseContext.popScope();
-        parseContext.unnestLooping();
-        --parseContext.controlFlowNestingLevel;
 
         break;
     }
